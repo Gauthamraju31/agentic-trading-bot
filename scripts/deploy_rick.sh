@@ -29,7 +29,7 @@ ssh $SERVER bash -c "'
   fi
 
   echo \"Installing requirements...\"
-  .venv/bin/pip install -r requirements.txt
+  .venv/bin/pip install -e .
 
   echo \"Installing systemd services...\"
   sudo cp systemd/tradingbot.service /etc/systemd/system/
