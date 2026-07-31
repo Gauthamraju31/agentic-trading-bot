@@ -148,7 +148,12 @@ class BaseAgent(ABC):
 
     async def _run_agy(self, prompt: str) -> Optional[str]:
         """Invoke the agy CLI in headless print mode. Returns text, or None if
-        unavailable/unauthenticated/errored (caller then falls back)."""
+        unavailable/unauthenticated/errored (caller then falls back).
+
+        Uses dual-speed LLM allocation: each agent role can have its own
+        reasoning effort level (low/medium/high) configured in
+        settings.agents.agy_effort_per_role.
+        """
         if not self._agy_path:
             return None
         if not _quota_tracker.can_make_request():
@@ -156,8 +161,20 @@ class BaseAgent(ABC):
             return None
 
         timeout = int(getattr(settings.agents, "llm_timeout_secs", 120))
+
+        # Dual-speed LLM: resolve per-role effort, fall back to global default
+        default_effort = getattr(settings.agents, "agy_effort", "low")
+        effort_map = getattr(settings.agents, "agy_effort_per_role", None)
+        role_key = self.role.value  # e.g. "technical_analyst", "bull", "portfolio_manager"
+        if effort_map and hasattr(effort_map, role_key):
+            effort = getattr(effort_map, role_key, default_effort)
+        elif isinstance(effort_map, dict) and role_key in effort_map:
+            effort = effort_map[role_key]
+        else:
+            effort = default_effort
+
         cmd = [self._agy_path, "-p", prompt, "--dangerously-skip-permissions",
-               "--print-timeout", f"{timeout}s", "--effort", getattr(settings.agents, "agy_effort", "low")]
+               "--print-timeout", f"{timeout}s", "--effort", effort]
         agy_model = getattr(settings.agents, "agy_model", "")
         if agy_model:
             cmd += ["--model", agy_model]

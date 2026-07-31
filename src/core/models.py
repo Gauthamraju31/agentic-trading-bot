@@ -428,3 +428,9 @@ class MarketContext(BaseModel):
     portfolio: Optional[PortfolioState] = None
     news_summary: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.now)
+
+    # India VIX regime data (populated by orchestrator/live feed)
+    vix_data: Optional[dict[str, Any]] = None
+
+    # NIFTY 50 benchmark data for alpha calculation: {"entry_price": float, "current_price": float}
+    benchmark_data: Optional[dict[str, float]] = None

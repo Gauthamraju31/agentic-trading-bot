@@ -13,6 +13,7 @@ LEARNING_STATS_FILE = Path("data/learning_stats.json")
 
 class SelfLearningEngine:
     """Tracks past agent decisions, evaluates price outcomes against realistic transaction cost buffers,
+    calculates Alpha vs NIFTY 50 benchmark, records post-trade reflections,
     and dynamically calibrates agent confidence weights once statistically significant sample sizes are met.
     """
 
@@ -30,7 +31,21 @@ class SelfLearningEngine:
             "risk_manager": {"total": 0, "correct": 0, "accuracy": 0.5, "weight": 1.0},
             "portfolio_manager": {"total": 0, "correct": 0, "accuracy": 0.5, "weight": 1.0},
         }
+
+        # Lazy-init reflection memory to avoid circular imports
+        self._reflection_memory = None
         self.load_stats()
+
+    @property
+    def reflection_memory(self):
+        if self._reflection_memory is None:
+            from src.agents.trade_memory import TradeReflectionMemory
+            from src.core.config import settings
+            learning_cfg = getattr(settings, "learning", None)
+            mem_file = Path(getattr(learning_cfg, "reflection_memory_file", "data/trade_reflection_memory.md")) if learning_cfg else Path("data/trade_reflection_memory.md")
+            max_ref = int(getattr(learning_cfg, "max_reflections_in_prompt", 5)) if learning_cfg else 5
+            self._reflection_memory = TradeReflectionMemory(memory_file=mem_file, max_in_prompt=max_ref)
+        return self._reflection_memory
 
     def load_stats(self) -> None:
         """Load historical learning stats from disk."""
@@ -66,6 +81,7 @@ class SelfLearningEngine:
             "entry_price": entry_price,
             "action": decision.action.value,
             "confidence": decision.confidence,
+            "reasoning": decision.reasoning[:300] if decision.reasoning else "",
             "opinions": [
                 {
                     "role": op.agent_role.value,
@@ -76,15 +92,26 @@ class SelfLearningEngine:
             ],
             "evaluated": False,
             "outcome": None,
-            "pnl_pct": 0.0
+            "pnl_pct": 0.0,
+            "alpha_pct": None,
         }
         self.decision_history.append(record)
         self.save_stats()
         logger.info(f"[SelfLearningEngine] Recorded decision {decision_id} for evaluation.")
         return decision_id
 
-    def evaluate_outcomes(self, current_prices: Dict[str, float]) -> List[Dict[str, Any]]:
-        """Evaluate pending past decisions against current market prices and update agent accuracy weights."""
+    def evaluate_outcomes(
+        self,
+        current_prices: Dict[str, float],
+        benchmark_prices: Optional[Dict[str, float]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Evaluate pending past decisions against current market prices.
+
+        Args:
+            current_prices: {symbol: current_price} for traded symbols.
+            benchmark_prices: Optional {symbol: (entry_price, current_price)} for the
+                              NIFTY 50 benchmark to calculate Alpha.
+        """
         evaluated = []
         for rec in self.decision_history:
             if rec["evaluated"]:
@@ -105,10 +132,19 @@ class SelfLearningEngine:
             change_pct = ((curr - entry) / entry) * 100.0
             rec["pnl_pct"] = round(change_pct, 2)
 
+            # Calculate Alpha vs NIFTY 50 benchmark
+            alpha_pct = None
+            if benchmark_prices:
+                for bench_sym, bench_data in benchmark_prices.items():
+                    if isinstance(bench_data, (list, tuple)) and len(bench_data) == 2:
+                        bench_entry, bench_curr = bench_data
+                        if bench_entry > 0:
+                            bench_return = ((bench_curr - bench_entry) / bench_entry) * 100.0
+                            alpha_pct = round(change_pct - bench_return, 2)
+                            rec["alpha_pct"] = alpha_pct
+                            break
+
             # Determine success with transaction cost buffer (COST_BUFFER_PCT = 0.30%):
-            # BUY is correct if price rose beyond costs (> +0.30%)
-            # SELL is correct if price fell beyond costs (< -0.30%)
-            # HOLD is correct if price stayed within cost buffer range (abs(change_pct) <= 0.30%)
             is_success = False
             if action == "BUY" and change_pct > self.COST_BUFFER_PCT:
                 is_success = True
@@ -120,6 +156,21 @@ class SelfLearningEngine:
             rec["evaluated"] = True
             rec["outcome"] = "SUCCESS" if is_success else "FAILURE"
             evaluated.append(rec)
+
+            # Record post-trade reflection
+            try:
+                self.reflection_memory.record_reflection(
+                    symbol=symbol,
+                    action=action,
+                    entry_price=entry,
+                    exit_price=curr,
+                    pnl_pct=change_pct,
+                    alpha_pct=alpha_pct,
+                    reasoning_summary=rec.get("reasoning", "No reasoning recorded."),
+                    outcome=rec["outcome"],
+                )
+            except Exception as e:
+                logger.warning(f"[SelfLearningEngine] Could not record reflection: {e}")
 
             # Update accuracy and weights for each individual agent opinion
             for op in rec.get("opinions", []):
@@ -151,7 +202,7 @@ class SelfLearningEngine:
 
         if evaluated:
             self.save_stats()
-            logger.info(f"[SelfLearningEngine] Evaluated {len(evaluated)} decisions with fee-adjusted buffer.")
+            logger.info(f"[SelfLearningEngine] Evaluated {len(evaluated)} decisions with fee-adjusted buffer + alpha tracking.")
 
         return evaluated
 

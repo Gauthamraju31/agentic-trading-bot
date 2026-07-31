@@ -4,6 +4,7 @@ from src.core.models import MarketContext, AgentOpinion, TradingDecision, Portfo
 from src.core.enums import AgentRole, SignalAction
 from src.core.config import settings
 from src.risk.position_sizer import PositionSizer
+from src.agents.trade_memory import TradeReflectionMemory
 from .base import BaseAgent
 from .prompts import PORTFOLIO_MANAGER_PROMPT
 
@@ -11,6 +12,11 @@ from .prompts import PORTFOLIO_MANAGER_PROMPT
 class PortfolioManagerAgent(BaseAgent):
     def __init__(self):
         super().__init__(role=AgentRole.PORTFOLIO_MANAGER, system_prompt=PORTFOLIO_MANAGER_PROMPT)
+        from pathlib import Path
+        learning_cfg = getattr(settings, "learning", None)
+        mem_file = Path(getattr(learning_cfg, "reflection_memory_file", "data/trade_reflection_memory.md")) if learning_cfg else Path("data/trade_reflection_memory.md")
+        max_ref = int(getattr(learning_cfg, "max_reflections_in_prompt", 5)) if learning_cfg else 5
+        self._memory = TradeReflectionMemory(memory_file=mem_file, max_in_prompt=max_ref)
 
     async def analyze(self, market_context: MarketContext, **kwargs) -> AgentOpinion:
         raise NotImplementedError("PortfolioManagerAgent uses make_decision(), not analyze().")
@@ -53,6 +59,18 @@ class PortfolioManagerAgent(BaseAgent):
             "constraint": f"Entry near ₹{curr_price:.2f}. stop_loss/take_profit within a few percent of it. "
                           f"position_size_pct in [0,100] but keep <= {settings.risk.max_position_pct}.",
         }
+
+        # Inject past trade reflections for this symbol
+        same_ticker_reflections = self._memory.get_recent_reflections(symbol=market_context.symbol)
+        cross_ticker_lessons = self._memory.get_cross_ticker_lessons(exclude_symbol=market_context.symbol)
+        if same_ticker_reflections:
+            context_data["past_reflections_same_ticker"] = same_ticker_reflections
+        if cross_ticker_lessons:
+            context_data["cross_ticker_lessons"] = cross_ticker_lessons
+
+        # Inject VIX context if available in market_context
+        if hasattr(market_context, 'vix_data') and market_context.vix_data:
+            context_data["india_vix"] = market_context.vix_data
 
         # ── LLM-driven path ───────────────────────────────────────────────────
         proposal = await self._generate_structured(

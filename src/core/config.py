@@ -67,6 +67,17 @@ class FeesConfig(BaseModel):
     stamp_duty_intraday_buy_pct: float = 0.003
 
 
+class AgyEffortPerRoleConfig(BaseModel):
+    """Per-agent reasoning effort levels for dual-speed LLM allocation."""
+    technical_analyst: str = "low"
+    sentiment_analyst: str = "low"
+    bull: str = "medium"
+    bear: str = "medium"
+    risk_manager: str = "low"
+    portfolio_manager: str = "high"
+    market_selector: str = "low"
+
+
 class AgentsConfig(BaseModel):
     llm_provider: str = "agy"          # agy | gemini | openai | antigravity | mock
     model_name: str = "gemini-2.5-flash"  # used by the gemini/openai langchain backends
@@ -76,7 +87,8 @@ class AgentsConfig(BaseModel):
     max_retries: int = 3
     # Antigravity CLI (agy) backend settings
     agy_model: str = ""                # optional agy model id; empty → agy default
-    agy_effort: str = "low"            # low | medium | high (reasoning effort)
+    agy_effort: str = "low"            # default reasoning effort per call
+    agy_effort_per_role: AgyEffortPerRoleConfig = Field(default_factory=AgyEffortPerRoleConfig)
     llm_timeout_secs: int = 120        # per-call timeout for the agy CLI
     # LLM quota / rate limiting
     max_rpd: int = 1000                # max requests per day
@@ -118,6 +130,21 @@ class AppConfig(BaseModel):
     data_dir: str = "data"
 
 
+class LearningConfig(BaseModel):
+    """Self-learning and post-trade reflection memory configuration."""
+    reflection_memory_file: str = "data/trade_reflection_memory.md"
+    max_reflections_in_prompt: int = 5
+    alpha_benchmark: str = "NIFTY 50"
+
+
+class VIXConfig(BaseModel):
+    """India VIX integration for regime-aware risk management."""
+    enabled: bool = True
+    high_vix_threshold: float = 18.0
+    halt_vix_threshold: float = 25.0
+    ticker: str = "^INDIAVIX"
+
+
 class Settings(BaseModel):
     """Root configuration model — maps to config/settings.yaml."""
 
@@ -128,6 +155,8 @@ class Settings(BaseModel):
     fees: FeesConfig = Field(default_factory=FeesConfig)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
+    learning: LearningConfig = Field(default_factory=LearningConfig)
+    vix: VIXConfig = Field(default_factory=VIXConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
 

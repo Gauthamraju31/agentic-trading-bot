@@ -79,7 +79,16 @@ agents:
   llm_provider: "agy"             # agy | gemini | openai | antigravity | mock
   model_name: "gemini-2.5-flash"  # used only by the gemini/openai backends
   agy_model: ""                   # optional agy model id (empty = agy default)
-  agy_effort: "low"               # low | medium | high — reasoning effort per call
+  agy_effort: "low"               # default reasoning effort per call
+  # Dual-speed LLM: heavy reasoning for debate/decisions, fast for scanning
+  agy_effort_per_role:
+    technical_analyst: "low"       # quick indicator summary
+    sentiment_analyst: "low"       # headline parsing
+    bull: "medium"                 # deep reasoning for thesis
+    bear: "medium"                 # deep reasoning for counter-thesis
+    risk_manager: "low"            # deterministic checks mostly
+    portfolio_manager: "high"      # final decision needs full reasoning
+    market_selector: "low"         # quick scan
   llm_timeout_secs: 120           # per-call timeout for the agy CLI
   temperature: 0.3                # low temperature for consistent decisions
   debate_rounds: 2                # bull vs bear debate rounds (>=1)
@@ -99,6 +108,23 @@ backtest:
     out_sample_days: 30    # 1 month validation window
   benchmark: "NIFTY 50"
   initial_capital: 1000000
+
+# ------------------------------------------------------------
+# Self-Learning & Reflection Memory
+# ------------------------------------------------------------
+learning:
+  reflection_memory_file: "data/trade_reflection_memory.md"
+  max_reflections_in_prompt: 5    # inject up to N recent reflections into PM prompt
+  alpha_benchmark: "NIFTY 50"     # track alpha vs this index
+
+# ------------------------------------------------------------
+# India VIX Integration
+# ------------------------------------------------------------
+vix:
+  enabled: true
+  high_vix_threshold: 18.0        # reduce position sizes when VIX > 18
+  halt_vix_threshold: 25.0        # halt new trades when VIX > 25
+  ticker: "^INDIAVIX"             # Yahoo Finance India VIX ticker
 
 # ------------------------------------------------------------
 # Dashboard & Alerts

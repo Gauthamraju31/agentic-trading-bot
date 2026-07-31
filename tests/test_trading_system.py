@@ -193,3 +193,145 @@ def test_self_learning_engine_cost_buffer_and_limits(tmp_path):
     weight = engine.get_agent_weight(AgentRole.BULL)
     assert weight == 1.0
 
+
+# ── Tests for TradingAgents-inspired features ──────────────────────────────────
+
+
+def test_trade_reflection_memory(tmp_path):
+    """Test that the reflection memory system records and retrieves lessons."""
+    from src.agents.trade_memory import TradeReflectionMemory
+
+    mem_file = tmp_path / "test_reflections.md"
+    memory = TradeReflectionMemory(memory_file=mem_file, max_in_prompt=3)
+
+    # Record a successful trade
+    memory.record_reflection(
+        symbol="RELIANCE",
+        action="BUY",
+        entry_price=1300.0,
+        exit_price=1320.0,
+        pnl_pct=1.54,
+        alpha_pct=0.72,
+        reasoning_summary="Strong RSI momentum above 60 with bullish MACD crossover",
+        outcome="SUCCESS",
+    )
+
+    # Record a failed trade
+    memory.record_reflection(
+        symbol="TCS",
+        action="BUY",
+        entry_price=2400.0,
+        exit_price=2380.0,
+        pnl_pct=-0.83,
+        alpha_pct=-1.1,
+        reasoning_summary="Bought on weak sentiment during FII selling",
+        outcome="FAILURE",
+    )
+
+    # Retrieve same-ticker reflections
+    reliance_reflections = memory.get_recent_reflections(symbol="RELIANCE")
+    assert "RELIANCE" in reliance_reflections
+    assert "SUCCESS" in reliance_reflections
+    assert "+1.54%" in reliance_reflections
+
+    # Retrieve cross-ticker lessons (excluding RELIANCE)
+    cross_lessons = memory.get_cross_ticker_lessons(exclude_symbol="RELIANCE")
+    assert "TCS" in cross_lessons
+    assert "FAILURE" in cross_lessons
+    assert "RELIANCE" not in cross_lessons.split("##")[1] if "##" in cross_lessons else True
+
+    # Empty filter - use a symbol that does NOT appear in any reflection text
+    empty = memory.get_recent_reflections(symbol="ZOMATO")
+    assert empty == ""
+
+
+def test_alpha_vs_nifty_tracking(tmp_path):
+    """Test that evaluate_outcomes correctly computes alpha vs NIFTY 50."""
+    from src.agents.self_learning import SelfLearningEngine
+    from src.core.models import TradingDecision, AgentOpinion
+    from src.core.enums import AgentRole
+
+    stats_file = tmp_path / "alpha_test_stats.json"
+    engine = SelfLearningEngine(stats_file=stats_file)
+
+    decision = TradingDecision(
+        symbol="RELIANCE",
+        action=SignalAction.BUY,
+        confidence=0.8,
+        reasoning="Alpha test trade",
+        agent_opinions=[
+            AgentOpinion(agent_role=AgentRole.TECHNICAL_ANALYST, reasoning="TA", confidence=0.7, action=SignalAction.BUY)
+        ]
+    )
+    engine.record_decision("RELIANCE", 1300.0, decision)
+
+    # Stock gained +1.5%, NIFTY gained +1.0% → alpha should be +0.5%
+    evaluated = engine.evaluate_outcomes(
+        current_prices={"RELIANCE": 1319.5},
+        benchmark_prices={"NIFTY 50": (24000.0, 24240.0)},  # +1.0%
+    )
+
+    assert len(evaluated) == 1
+    assert evaluated[0]["alpha_pct"] is not None
+    assert evaluated[0]["alpha_pct"] == pytest.approx(0.5, abs=0.1)
+    assert evaluated[0]["outcome"] == "SUCCESS"  # +1.5% > 0.3% cost buffer
+
+
+def test_india_vix_regime_classification():
+    """Test VIX regime classification and position multiplier logic."""
+    from src.data.india_vix import IndiaVIXFetcher
+
+    fetcher = IndiaVIXFetcher()
+
+    # Low volatility
+    assert fetcher._classify_regime(10.0) == "LOW_VOLATILITY"
+    assert fetcher._position_size_multiplier(10.0) == 1.0
+
+    # Moderate
+    assert fetcher._classify_regime(15.0) == "MODERATE"
+    assert fetcher._position_size_multiplier(15.0) == 0.8
+
+    # High volatility
+    assert fetcher._classify_regime(20.0) == "HIGH_VOLATILITY"
+    assert fetcher._position_size_multiplier(20.0) == 0.5
+
+    # Extreme
+    assert fetcher._classify_regime(28.0) == "EXTREME"
+    assert fetcher._position_size_multiplier(28.0) == 0.25
+
+
+def test_dual_speed_llm_config():
+    """Test that per-agent effort levels are properly configured."""
+    agents_cfg = settings.agents
+    effort_map = getattr(agents_cfg, "agy_effort_per_role", None)
+    assert effort_map is not None
+
+    # Quick agents should use low effort
+    assert getattr(effort_map, "technical_analyst", "low") == "low"
+    assert getattr(effort_map, "sentiment_analyst", "low") == "low"
+
+    # Debate agents should use medium effort
+    assert getattr(effort_map, "bull", "low") == "medium"
+    assert getattr(effort_map, "bear", "low") == "medium"
+
+    # Portfolio manager should use high effort for deep reasoning
+    assert getattr(effort_map, "portfolio_manager", "low") == "high"
+
+
+def test_market_context_has_vix_and_benchmark_fields():
+    """Test that MarketContext model accepts VIX and benchmark data."""
+    candle = Candle(
+        symbol="RELIANCE",
+        timestamp=datetime.now(),
+        open=1300.0, high=1310.0, low=1295.0, close=1305.0,
+        volume=50000,
+    )
+    ctx = MarketContext(
+        symbol="RELIANCE",
+        current_price=1305.0,
+        candles=[candle],
+        vix_data={"vix_value": 14.5, "regime": "MODERATE", "position_size_multiplier": 0.8},
+        benchmark_data={"entry_price": 24000.0, "current_price": 24050.0},
+    )
+    assert ctx.vix_data["regime"] == "MODERATE"
+    assert ctx.benchmark_data["entry_price"] == 24000.0

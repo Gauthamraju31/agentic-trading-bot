@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from typing import TypedDict, Optional, List, Tuple, Dict
 
 from loguru import logger
@@ -32,6 +33,13 @@ except ImportError:
     LANGGRAPH_AVAILABLE = False
     logger.warning("langgraph not available. Orchestrator will use the sequential pipeline.")
 
+try:
+    from langgraph.checkpoint.sqlite import SqliteSaver
+    CHECKPOINT_AVAILABLE = True
+except ImportError:
+    SqliteSaver = None
+    CHECKPOINT_AVAILABLE = False
+
 
 class AgentOrchestrator:
     """Multi-agent orchestrator: parallel analysis → bull/bear debate → LLM
@@ -39,7 +47,7 @@ class AgentOrchestrator:
     paths delegate to the SAME helper methods so their logic can never diverge.
     """
 
-    def __init__(self):
+    def __init__(self, enable_checkpoint: bool = True):
         self.market_selector = MarketSelectorAgent()
         self.tech_agent = TechnicalAnalystAgent()
         self.sentiment_agent = SentimentAnalystAgent()
@@ -48,6 +56,23 @@ class AgentOrchestrator:
         self.risk_agent = RiskManagerAgent()
         self.portfolio_agent = PortfolioManagerAgent()
         self.learning = SelfLearningEngine()
+
+        # India VIX fetcher for regime-aware decisions
+        self._vix_fetcher = None
+        self._vix_data = None
+
+        # LangGraph checkpoint for crash-safe resume
+        self._checkpointer = None
+        if enable_checkpoint and CHECKPOINT_AVAILABLE:
+            try:
+                from pathlib import Path
+                ckpt_path = Path("data/langgraph_checkpoints.db")
+                ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(str(ckpt_path), check_same_thread=False)
+                self._checkpointer = SqliteSaver(conn)
+                logger.info("[Orchestrator] LangGraph SQLite checkpoint enabled for crash-safe resume.")
+            except Exception as e:
+                logger.warning(f"[Orchestrator] Failed to init SQLite checkpointer: {e}")
 
         self.graph = self._build_graph() if LANGGRAPH_AVAILABLE else None
 
@@ -128,6 +153,8 @@ class AgentOrchestrator:
         workflow.add_edge("debate", "decision")
         workflow.add_edge("decision", END)
 
+        if self._checkpointer:
+            return workflow.compile(checkpointer=self._checkpointer)
         return workflow.compile()
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -138,8 +165,27 @@ class AgentOrchestrator:
         decision = await self.run(selected_context)
         return selected_context, decision, rationale
 
+    async def _fetch_vix(self) -> Optional[Dict]:
+        """Fetch India VIX data for regime-aware position sizing."""
+        if self._vix_fetcher is None:
+            from src.data.india_vix import IndiaVIXFetcher
+            self._vix_fetcher = IndiaVIXFetcher()
+        try:
+            return await self._vix_fetcher.fetch_current_vix()
+        except Exception as e:
+            logger.warning(f"[Orchestrator] VIX fetch failed: {e}")
+            return None
+
     async def run(self, market_context: MarketContext) -> TradingDecision:
         logger.info(f"Starting agent orchestrator for {market_context.symbol}")
+
+        # Fetch India VIX and attach to context
+        vix_data = await self._fetch_vix()
+        if vix_data:
+            self._vix_data = vix_data
+            market_context.vix_data = vix_data
+            if vix_data.get("should_halt"):
+                logger.warning(f"[Orchestrator] India VIX at {vix_data.get('vix_value')} — EXTREME volatility, recommending HOLD.")
 
         if self.graph:
             initial_state = TradingState(
@@ -150,7 +196,10 @@ class AgentOrchestrator:
                 bear_opinion=None,
                 decision=None,
             )
-            result = await self.graph.ainvoke(initial_state)
+            config = {}
+            if self._checkpointer:
+                config = {"configurable": {"thread_id": f"{market_context.symbol}_{market_context.timestamp.strftime('%Y%m%d_%H%M') if market_context.timestamp else 'now'}"}}
+            result = await self.graph.ainvoke(initial_state, config=config)
             return result["decision"]
 
         # Sequential fallback (identical logic, no langgraph).
