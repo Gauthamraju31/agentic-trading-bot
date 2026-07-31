@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily Autonomous Trading Bot Timer (09:00 AM IST Mon-Fri)
+
+[Timer]
+# Run every weekday (Mon-Fri) at 09:00:00 IST (03:30:00 UTC)
+OnCalendar=Mon..Fri *-*-* 03:30:00 UTC
+Persistent=true
+
+[Install]
+WantedBy=timers.target

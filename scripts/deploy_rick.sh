@@ -31,13 +31,14 @@ ssh $SERVER bash -c "'
   echo \"Installing requirements...\"
   .venv/bin/pip install -e .
 
-  echo \"Installing systemd services...\"
+  echo \"Installing systemd services & timers...\"
   sudo cp systemd/tradingbot.service /etc/systemd/system/
+  sudo cp systemd/tradingbot.timer /etc/systemd/system/
   sudo cp systemd/tradingdashboard.service /etc/systemd/system/
   sudo systemctl daemon-reload
-  sudo systemctl enable tradingbot.service tradingdashboard.service
+  sudo systemctl enable tradingbot.timer tradingdashboard.service
+  sudo systemctl start tradingbot.timer
   sudo systemctl restart tradingdashboard.service
-  sudo systemctl restart tradingbot.service
 
   echo \"✅ Deployment complete!\"
   echo \"Dashboard running at: http://rick.drunkcoder.dev:8080\"
