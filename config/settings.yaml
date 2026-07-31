@@ -127,6 +127,17 @@ vix:
   ticker: "^INDIAVIX"             # Yahoo Finance India VIX ticker
 
 # ------------------------------------------------------------
+# Daily Profit Goal & Risk Limits
+# ------------------------------------------------------------
+daily_goal:
+  target_profit: 100.0      # Stop trading for the day when net profit >= ₹100
+  max_loss: 200.0           # Stop trading for the day when net loss >= ₹200
+  auto_stop_on_target: true
+  pre_market_start: "09:00"
+  market_open: "09:15"
+  market_close: "15:30"
+
+# ------------------------------------------------------------
 # Dashboard & Alerts
 # ------------------------------------------------------------
 dashboard:

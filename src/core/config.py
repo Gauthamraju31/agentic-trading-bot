@@ -145,6 +145,16 @@ class VIXConfig(BaseModel):
     ticker: str = "^INDIAVIX"
 
 
+class DailyGoalConfig(BaseModel):
+    """Daily profit goal and risk limit settings."""
+    target_profit: float = 100.0    # Target profit per day in INR
+    max_loss: float = 200.0         # Max allowable daily loss in INR
+    auto_stop_on_target: bool = True
+    pre_market_start: str = "09:00"
+    market_open: str = "09:15"
+    market_close: str = "15:30"
+
+
 class Settings(BaseModel):
     """Root configuration model — maps to config/settings.yaml."""
 
@@ -157,6 +167,7 @@ class Settings(BaseModel):
     backtest: BacktestConfig = Field(default_factory=BacktestConfig)
     learning: LearningConfig = Field(default_factory=LearningConfig)
     vix: VIXConfig = Field(default_factory=VIXConfig)
+    daily_goal: DailyGoalConfig = Field(default_factory=DailyGoalConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
 

@@ -1,25 +1,25 @@
 {
   "agent_accuracy": {
     "technical_analyst": {
-      "total": 1,
+      "total": 2,
       "correct": 0,
       "accuracy": 0.0,
       "weight": 1.0
     },
     "sentiment_analyst": {
-      "total": 1,
+      "total": 2,
       "correct": 0,
       "accuracy": 0.0,
       "weight": 1.0
     },
     "bull": {
-      "total": 1,
+      "total": 2,
       "correct": 0,
       "accuracy": 0.0,
       "weight": 1.0
     },
     "bear": {
-      "total": 1,
+      "total": 2,
       "correct": 0,
       "accuracy": 0.0,
       "weight": 1.0
@@ -70,6 +70,41 @@
       "evaluated": true,
       "outcome": "FAILURE",
       "pnl_pct": 0.16
+    },
+    {
+      "id": "RELIANCE_20260731_203821",
+      "symbol": "RELIANCE",
+      "timestamp": "2026-07-31T20:38:21.057985",
+      "entry_price": 1305.6525,
+      "action": "BUY",
+      "confidence": 0.78,
+      "reasoning": "Final Action: BUY | Confidence: 0.78 | [LLM] Strong bull thesis (0.82) outweighs bear concerns (0.38), backed by technical momentum (BUY @ 0.75 confidence, price above EMA 9/21, positive MACD 1.64, ADX 26.21) and heavy DII buying (82%). Low VIX regime (11.76) supports full position sizing multiplier",
+      "opinions": [
+        {
+          "role": "technical_analyst",
+          "action": "BUY",
+          "confidence": 0.75
+        },
+        {
+          "role": "sentiment_analyst",
+          "action": "BUY",
+          "confidence": 0.37
+        },
+        {
+          "role": "bull",
+          "action": "BUY",
+          "confidence": 0.82
+        },
+        {
+          "role": "bear",
+          "action": "SELL",
+          "confidence": 0.38
+        }
+      ],
+      "evaluated": true,
+      "outcome": "FAILURE",
+      "pnl_pct": 0.16,
+      "alpha_pct": null
     }
   ]
 }

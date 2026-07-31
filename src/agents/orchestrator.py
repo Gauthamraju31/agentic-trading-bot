@@ -34,10 +34,10 @@ except ImportError:
     logger.warning("langgraph not available. Orchestrator will use the sequential pipeline.")
 
 try:
-    from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.memory import MemorySaver
     CHECKPOINT_AVAILABLE = True
 except ImportError:
-    SqliteSaver = None
+    MemorySaver = None
     CHECKPOINT_AVAILABLE = False
 
 
@@ -61,18 +61,14 @@ class AgentOrchestrator:
         self._vix_fetcher = None
         self._vix_data = None
 
-        # LangGraph checkpoint for crash-safe resume
+        # LangGraph checkpoint for crash-safe state management
         self._checkpointer = None
         if enable_checkpoint and CHECKPOINT_AVAILABLE:
             try:
-                from pathlib import Path
-                ckpt_path = Path("data/langgraph_checkpoints.db")
-                ckpt_path.parent.mkdir(parents=True, exist_ok=True)
-                conn = sqlite3.connect(str(ckpt_path), check_same_thread=False)
-                self._checkpointer = SqliteSaver(conn)
-                logger.info("[Orchestrator] LangGraph SQLite checkpoint enabled for crash-safe resume.")
+                self._checkpointer = MemorySaver()
+                logger.info("[Orchestrator] LangGraph Memory checkpointer enabled for state persistence.")
             except Exception as e:
-                logger.warning(f"[Orchestrator] Failed to init SQLite checkpointer: {e}")
+                logger.warning(f"[Orchestrator] Failed to init Memory checkpointer: {e}")
 
         self.graph = self._build_graph() if LANGGRAPH_AVAILABLE else None
 

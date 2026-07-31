@@ -1,0 +1,17 @@
+[Unit]
+Description=Autonomous Agentic Indian Trading Bot Daemon
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/trading-bot
+ExecStart=/home/ubuntu/trading-bot/.venv/bin/python scripts/run_daily_bot.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

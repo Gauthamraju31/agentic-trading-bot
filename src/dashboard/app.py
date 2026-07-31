@@ -344,11 +344,37 @@ HTML_TEMPLATE = """
         </div>
 
         <div class="btn-group">
-            <button class="btn-start" onclick="startBot()">▶ Start Bot</button>
+            <button class="btn-start" onclick="startBot()">▶ Start Daily Bot</button>
             <button class="btn-stop" onclick="stopBot()">⏸ Stop Bot</button>
-            <button class="btn-action" onclick="runBacktest()">📊 Run Backtest</button>
-            <button class="btn-action" onclick="downloadData()">📥 Download Data</button>
-            <button class="btn-kill" onclick="resetCircuitBreaker()">⚡ Reset Circuit</button>
+            <button class="btn-action" onclick="runPreMarket()">🌅 Pre-Market Research</button>
+            <button class="btn-action" onclick="runBacktest()">📊 Backtest</button>
+            <button class="btn-kill" onclick="triggerKillSwitch()">⚡ EMERGENCY KILL SWITCH</button>
+        </div>
+    </div>
+
+    <!-- DAILY PROFIT GOAL PROGRESS CARD -->
+    <div class="card" style="margin-bottom: 24px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #3b82f6;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <h2 style="margin: 0; color: #60a5fa;">🎯 Daily Profit Goal Progress</h2>
+            <div style="font-size: 13px; color: var(--text-muted);">
+                Target: <b style="color: #34d399;" id="goal-target-lbl">₹100.00</b> | Max Loss: <b style="color: #f87171;" id="goal-loss-lbl">₹200.00</b>
+            </div>
+        </div>
+        <div style="background: #090d16; border-radius: 10px; height: 24px; width: 100%; overflow: hidden; position: relative; margin-bottom: 10px; border: 1px solid var(--card-border);">
+            <div id="goal-progress-bar" style="background: linear-gradient(90deg, #10b981, #3b82f6); height: 100%; width: 0%; transition: width 0.5s ease;"></div>
+            <span id="goal-progress-txt" style="position: absolute; top: 3px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 700; color: #ffffff;">₹0.00 / ₹100.00 (0%)</span>
+        </div>
+        <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted);">
+            <span>Daily Realized Net P&L: <b id="goal-realized-val" style="color: white;">₹0.00</b></span>
+            <span>Session Status: <b id="goal-status-val" style="color: #fbbf24;">PRE_MARKET</b></span>
+        </div>
+    </div>
+
+    <!-- PRE-MARKET AI PLAYBOOK CARD -->
+    <div class="card" style="margin-bottom: 24px; border: 1px solid #059669;">
+        <h2>🌅 Pre-Market AI Research Playbook <span id="pb-status" style="font-size: 12px; color: var(--text-muted); font-weight: normal;">(Autonomous Plan)</span></h2>
+        <div id="playbook-content" style="font-size: 13px; line-height: 1.6; color: var(--text-main);">
+            <div style="color: var(--text-muted);">Pre-market research has not run yet. Click 'Pre-Market Research' to generate today's playbook.</div>
         </div>
     </div>
 
@@ -496,6 +522,44 @@ HTML_TEMPLATE = """
                     `).join('');
                 }
 
+                // Update Daily Goal Progress Bar & Status
+                try {
+                    const goalRes = await fetch('/api/daily-goal');
+                    const goal = await goalRes.json();
+                    
+                    document.getElementById('goal-target-lbl').innerText = '₹' + goal.target_profit.toFixed(2);
+                    document.getElementById('goal-loss-lbl').innerText = '₹' + goal.max_loss.toFixed(2);
+                    document.getElementById('goal-realized-val').innerText = '₹' + goal.realized_pnl.toFixed(2);
+                    document.getElementById('goal-status-val').innerText = goal.status;
+                    
+                    const pct = Math.max(0, Math.min(100, goal.progress_pct));
+                    document.getElementById('goal-progress-bar').style.width = pct + '%';
+                    document.getElementById('goal-progress-txt').innerText = `₹${goal.realized_pnl.toFixed(2)} / ₹${goal.target_profit.toFixed(2)} (${goal.progress_pct.toFixed(1)}%)`;
+                } catch(err) { console.error("Goal fetch err", err); }
+
+                // Update Pre-Market Playbook
+                try {
+                    const pbRes = await fetch('/api/pre-market-playbook');
+                    const pb = await pbRes.json();
+                    const pbContainer = document.getElementById('playbook-content');
+                    if (pb.primary_pick) {
+                        const p = pb.primary_pick;
+                        pbContainer.innerHTML = `
+                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px;">
+                                <div><b>Target Symbol:</b> <span style="color: #60a5fa; font-weight:700;">${p.symbol}</span></div>
+                                <div><b>Action Signal:</b> <span style="color: ${p.action === 'BUY' ? 'var(--accent-green)' : (p.action === 'SELL' ? 'var(--accent-red)' : '#fbbf24')}; font-weight:700;">${p.action}</span> (Conf: ${(p.confidence*100).toFixed(0)}%)</div>
+                                <div><b>Planned Entry:</b> ₹${p.entry_price ? p.entry_price.toFixed(2) : p.current_price.toFixed(2)}</div>
+                                <div><b>Stop Loss / Take Profit:</b> ₹${p.stop_loss || 'Dynamic'} / ₹${p.take_profit || 'Dynamic'}</div>
+                            </div>
+                            <div style="background: #0f172a; padding: 10px; border-radius: 6px; border-left: 3px solid #10b981; font-size: 12px; color: #cbd5e1;">
+                                <b>🤖 AI Multi-Agent Thesis:</b> ${p.reasoning}
+                            </div>
+                        `;
+                    } else if (pb.status === 'HALTED') {
+                        pbContainer.innerHTML = `<div style="color: var(--accent-red);">🚨 ${pb.reason}</div>`;
+                    }
+                } catch(err) { console.error("Playbook fetch err", err); }
+
                 // Update Logs
                 const logConsole = document.getElementById('log-console');
                 logConsole.innerHTML = state.logs.map(l => `
@@ -525,6 +589,19 @@ HTML_TEMPLATE = """
         async function stopBot() {
             await fetch('/api/control/stop', { method: 'POST' });
             updateDashboard();
+        }
+
+        async function runPreMarket() {
+            alert("Starting Pre-Market Research across Nifty candidate universe...");
+            await fetch('/api/control/run-pre-market', { method: 'POST' });
+            setTimeout(updateDashboard, 2000);
+        }
+
+        async function triggerKillSwitch() {
+            if (confirm("⚠️ EMERGENCY KILL SWITCH: Are you sure you want to flatten all positions and stop trading immediately?")) {
+                await fetch('/api/control/kill-switch', { method: 'POST' });
+                updateDashboard();
+            }
         }
 
         async function resetCircuitBreaker() {
@@ -631,10 +708,64 @@ async def stop_bot_control():
     return {"status": "stopped"}
 
 
+@app.get("/api/daily-goal")
+async def get_daily_goal():
+    from src.core.daily_goal_manager import DailyGoalManager
+    return DailyGoalManager().get_summary()
+
+
+@app.get("/api/pre-market-playbook")
+async def get_playbook():
+    from src.agents.pre_market_planner import PreMarketPlanner
+    pb = PreMarketPlanner().get_latest_playbook()
+    return pb or {"status": "NO_PLAYBOOK", "message": "Pre-market research has not run today."}
+
+
+class UpdateGoalRequest(BaseModel):
+    target_profit: float = 100.0
+    max_loss: float = 200.0
+
+
+@app.post("/api/daily-goal/config")
+async def update_daily_goal_config(req: UpdateGoalRequest):
+    from src.core.daily_goal_manager import DailyGoalManager
+    mgr = DailyGoalManager()
+    mgr.set_config(req.target_profit, req.max_loss)
+    log_to_dashboard(f"Updated Daily Targets: Profit Goal = ₹{req.target_profit:.2f}, Max Loss = ₹{req.max_loss:.2f}", level="SUCCESS")
+    return mgr.get_summary()
+
+
+@app.post("/api/control/run-pre-market")
+async def trigger_pre_market(background_tasks: BackgroundTasks):
+    from src.agents.pre_market_planner import PreMarketPlanner
+
+    async def _run():
+        log_to_dashboard("Starting autonomous pre-market research across top Nifty candidates...", level="INFO")
+        planner = PreMarketPlanner()
+        pb = await planner.run_pre_market_analysis()
+        pick = pb.get("primary_pick")
+        if pick:
+            log_to_dashboard(f"🌅 Pre-Market Research Complete! Selected Pick: {pick.get('symbol')} [{pick.get('action')}] @ ₹{pick.get('current_price'):.2f}", level="SUCCESS")
+        else:
+            log_to_dashboard("Pre-market research completed.", level="INFO")
+
+    background_tasks.add_task(_run)
+    return {"status": "started", "message": "Pre-market research started in background"}
+
+
+@app.post("/api/control/kill-switch")
+async def trigger_kill_switch():
+    bot_state["status"] = "STOPPED"
+    bot_loop_stop_event.set()
+    bot_state["positions"] = []
+    log_to_dashboard("🚨 EMERGENCY KILL SWITCH ACTIVATED! All open positions flattened. Bot halted.", level="ERROR")
+    return {"status": "killed"}
+
+
 @app.post("/api/circuit-breaker/reset")
 async def reset_circuit_breaker():
     bot_state["circuit_breaker_active"] = False
-    if bot_state["status"] == "CIRCUIT_BROKEN":
+    if bot_state["status"] in ("CIRCUIT_BROKEN", "STOPPED"):
         bot_state["status"] = "STOPPED"
     log_to_dashboard("Circuit breaker reset via Dashboard.", level="SUCCESS")
     return {"status": "reset"}

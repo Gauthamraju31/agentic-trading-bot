@@ -1,0 +1,35 @@
+{
+  "date": "2026-07-31",
+  "timestamp": "2026-07-31T20:51:30.250351",
+  "status": "READY",
+  "vix_data": {
+    "vix_value": 11.76,
+    "vix_change": -0.4,
+    "regime": "LOW_VOLATILITY",
+    "position_size_multiplier": 1.0,
+    "should_halt": false,
+    "summary": "India VIX: 11.76 (-0.40 from prev) | Regime: LOW_VOLATILITY | Position multiplier: 1.00x"
+  },
+  "sentiment_summary": "FIIs cut stakes in 72% of Nifty50 stocks, DIIs buy 82%. Here\u2019s where the money moved .",
+  "primary_pick": {
+    "symbol": "ITC",
+    "current_price": 281.0,
+    "action": "HOLD",
+    "confidence": 0.68,
+    "entry_price": 281.0,
+    "stop_loss": null,
+    "take_profit": null,
+    "position_size": 0,
+    "reasoning": "Final Action: HOLD | Confidence: 0.68 | [LLM] ITC is trapped in a narrow consolidation band between support at \u20b9280.50 and resistance at \u20b9281.45. Bearish technical indicators (RSI 44.44, negative MACD -0.215, price below 21 EMA) and a 27% YoY profit decline outweigh top-line revenue growth. High ADX (35.11) validates current downward pressure rather than upside momentum. Entering within this tight range carries high risk of underperforming NIFTY (negative alpha); holding until a decisive breakout above \u20b9281.45 or breakdown below \u20b9280.50 is recommended.",
+    "selector_rationale": "Selected ITC (Intraday Score: 61.16). Reason: Based on the technical metrics provided for **ITC** (and in context of the candidate universe):\n\n### **Technical Analysis for ITC**\n* **Selected Symbol**: ITC\n* **Current Price**: \u20b9281.00\n* **Technical Score**: **61.16** (Highest among all candidate stocks)\n* **ADX (Trend Strength)**: **35.11** \n  * *Interpretation*: ADX > 25 indicates a strong trending market, and 35.11 reflects very strong trend strength/momentum compared to peers (e.g., RELIANCE at 26.21, BAJFINANCE at 29.32).\n* **RSI (Momentum)**: **44.44**\n  * *Interpretation*: RSI is in a neutral-to-cool range (below 50, far from overbought >70). This suggests the stock is not overextended and has room to move higher without immediate overbought risk.\n* **ATR Pct (Volatility)**: **0.15%**\n  * *Interpretation*: Low relative volatility ensures manageable risk and standard stop-loss positioning.\n\n---\n\n### **Key Highlights vs. Peers**\n* **Highest Overall Score**: 61.16, beating RELIANCE (56.36) and BAJFINANCE (50.52).\n* **Strongest Trend Dynamics**: Outperforms all peers in trend solidity (ADX 35.11).\n\n---\n\n### **Recommendation**\n**BUY**\n\n* **Rationale**: Strong trend momentum (ADX ~35.1), moderate/healthy RSI (44.44) offering attractive entry without overbought risks, low ATR volatility, and the top technical composite score (61.16)."
+  },
+  "candidate_count": 10,
+  "agents_consulted": [
+    "TECHNICAL_ANALYST",
+    "SENTIMENT_ANALYST",
+    "BULL",
+    "BEAR",
+    "RISK_MANAGER",
+    "PORTFOLIO_MANAGER"
+  ]
+}
