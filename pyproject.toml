@@ -17,6 +17,7 @@ dependencies = [
     "numpy>=1.26",
     "pandas-ta>=0.3.14b1",
     "polars>=1.0",
+    "yfinance>=0.2.38",
 
     # Database
     "sqlalchemy>=2.0",
