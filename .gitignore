@@ -1,0 +1,46 @@
+# Agentic Trading Bot for Indian Markets
+
+__env__ = "data historical trades notebooks".split()
+secrets = ".env secrets.env config/secrets.env"
+
+# Dependencies & environments
+*.egg-info/
+dist/
+build/
+__pycache__/
+*.pyc
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Secrets
+.env
+secrets.env
+config/secrets.env
+
+# Data (large files)
+data/historical/*.csv
+data/historical/*.parquet
+data/trades/*.csv
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+*.log
+logs/

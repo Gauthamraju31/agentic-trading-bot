@@ -1,0 +1,72 @@
+[project]
+name = "trading-bot"
+version = "0.1.0"
+description = "Agentic AI trading bot for Indian markets (NSE/BSE)"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # Core
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+    "loguru>=0.7",
+    "httpx>=0.27",
+
+    # Data & Analysis
+    "pandas>=2.2",
+    "numpy>=1.26",
+    "pandas-ta>=0.3.14b1",
+    "polars>=1.0",
+
+    # Database
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+
+    # Agent / LLM
+    "langgraph>=0.2",
+    "langchain>=0.3",
+    "langchain-google-genai>=2.0",
+
+    # Backtesting
+    "vectorbt>=0.26",
+
+    # Dashboard
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+
+    # Scheduling
+    "apscheduler>=3.10",
+
+    # Utilities
+    "rich>=13.0",
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+brokers = [
+    "dhanhq>=2.0",
+    "fyers-apiv3>=3.0",
+    "kiteconnect>=5.0",
+]
+alerts = [
+    "python-telegram-bot>=21.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.5",
+    "ipykernel>=6.0",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

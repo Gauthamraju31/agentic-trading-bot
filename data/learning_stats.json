@@ -1,0 +1,75 @@
+{
+  "agent_accuracy": {
+    "technical_analyst": {
+      "total": 1,
+      "correct": 0,
+      "accuracy": 0.0,
+      "weight": 1.0
+    },
+    "sentiment_analyst": {
+      "total": 1,
+      "correct": 0,
+      "accuracy": 0.0,
+      "weight": 1.0
+    },
+    "bull": {
+      "total": 1,
+      "correct": 0,
+      "accuracy": 0.0,
+      "weight": 1.0
+    },
+    "bear": {
+      "total": 1,
+      "correct": 0,
+      "accuracy": 0.0,
+      "weight": 1.0
+    },
+    "risk_manager": {
+      "total": 0,
+      "correct": 0,
+      "accuracy": 0.5,
+      "weight": 1.0
+    },
+    "portfolio_manager": {
+      "total": 0,
+      "correct": 0,
+      "accuracy": 0.5,
+      "weight": 1.0
+    }
+  },
+  "decision_history": [
+    {
+      "id": "RELIANCE_20260731_200043",
+      "symbol": "RELIANCE",
+      "timestamp": "2026-07-31T20:00:43.986956",
+      "entry_price": 1305.6525,
+      "action": "BUY",
+      "confidence": 0.76,
+      "opinions": [
+        {
+          "role": "technical_analyst",
+          "action": "BUY",
+          "confidence": 0.75
+        },
+        {
+          "role": "sentiment_analyst",
+          "action": "BUY",
+          "confidence": 0.37
+        },
+        {
+          "role": "bull",
+          "action": "BUY",
+          "confidence": 0.85
+        },
+        {
+          "role": "bear",
+          "action": "SELL",
+          "confidence": 0.42
+        }
+      ],
+      "evaluated": true,
+      "outcome": "FAILURE",
+      "pnl_pct": 0.16
+    }
+  ]
+}
