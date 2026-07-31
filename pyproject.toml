@@ -16,6 +16,7 @@ dependencies = [
     "pandas>=2.2",
     "numpy>=1.26",
     "pandas-ta>=0.3.14b1",
+    "ta>=0.11.0",
     "polars>=1.0",
     "yfinance>=0.2.38",
 
