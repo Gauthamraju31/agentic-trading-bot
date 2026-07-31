@@ -24,6 +24,7 @@ config/secrets.env
 data/historical/*.csv
 data/historical/*.parquet
 data/trades/*.csv
+data/*.json
 
 # Database
 *.db
