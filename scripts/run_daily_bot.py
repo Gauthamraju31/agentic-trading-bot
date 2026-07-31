@@ -34,14 +34,21 @@ from src.execution.order_validator import OrderValidator
 from src.execution.position_manager import PositionManager
 
 
+from src.core.market_hours import get_ist_now, get_market_status, is_trading_day
+
+
 async def run_daily_trading_session(test_mode: bool = False, loop_interval_secs: int = 10):
     console = Console()
+    now_ist = get_ist_now()
+    mkt_status = get_market_status()
+
     console.print(
         Panel.fit(
             "[bold green]🤖 Autonomous Indian Daily Trading Bot[/bold green]\n"
+            f"[dim]Timezone: [bold cyan]IST (Asia/Kolkata)[/bold cyan] | Current Time: [bold white]{now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}[/bold white][/dim]\n"
+            f"[dim]Market Status: [bold yellow]{mkt_status['status']}[/bold yellow] ({mkt_status['reason']})[/dim]\n"
             f"[dim]Daily Target Profit: [bold yellow]₹{settings.daily_goal.target_profit:.2f}[/bold yellow] | "
-            f"Daily Max Loss: [bold red]₹{settings.daily_goal.max_loss:.2f}[/bold red][/dim]\n"
-            "[dim]Pre-Market Research → AI Playbook → Live Execution → Fee-Adjusted Goal Lock[/dim]",
+            f"Daily Max Loss: [bold red]₹{settings.daily_goal.max_loss:.2f}[/bold red][/dim]",
             border_style="green",
         )
     )
@@ -56,12 +63,16 @@ async def run_daily_trading_session(test_mode: bool = False, loop_interval_secs:
     alert_mgr = AlertManager()
     feed = LiveDataFeed()
 
-    # ── Step 1: Pre-Market Planning Phase ────────────────────────────────────
-    now_time = datetime.now().time()
-    market_open_time = time(9, 15)
+    # ── Weekend / Holiday & Hours Check ──────────────────────────────────────
+    if not test_mode and not mkt_status["is_trading_day"]:
+        console.print(f"[bold red]⛔ {mkt_status['reason']}. Trading bot will not place trades today.[/bold red]")
+        if alert_mgr.enabled:
+            await alert_mgr.send_alert(f"ℹ️ <b>Daily Trading Bot Status</b>: Market Closed ({mkt_status['reason']}).", level="INFO")
+        return
 
+    # ── Step 1: Pre-Market Planning Phase ────────────────────────────────────
     playbook = planner.get_latest_playbook()
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = now_ist.strftime("%Y-%m-%d")
 
     if not playbook or playbook.get("date") != today_str:
         console.print("[bold yellow]Phase 1: Running Pre-Market Autonomous Research...[/bold yellow]")
@@ -88,6 +99,11 @@ async def run_daily_trading_session(test_mode: bool = False, loop_interval_secs:
         console.print(f"[bold yellow]Trading for today is already finished. Status: {goal_mgr.status}[/bold yellow]")
         return
 
+    # Outside market hours check (if past 15:30 IST)
+    if not test_mode and mkt_status["status"] == "MARKET_CLOSED":
+        console.print("[bold red]Market is closed for the day (> 03:30 PM IST). Bot halting.[/bold red]")
+        return
+
     goal_mgr.status = "TRADING_ACTIVE"
     console.print("\n[bold yellow]Phase 2: Live Market Execution Loop Active...[/bold yellow]")
 
@@ -97,7 +113,24 @@ async def run_daily_trading_session(test_mode: bool = False, loop_interval_secs:
 
     while tick_count < max_ticks:
         tick_count += 1
-        current_dt = datetime.now()
+        current_dt = get_ist_now()
+
+        # Check if market has closed (15:30 IST)
+        if not test_mode and current_dt.time() >= time(15, 30):
+            console.print("[bold red]⏰ Market closed at 03:30 PM IST. Auto-squaring off all intraday positions...[/bold red]")
+            # Square off positions
+            portfolio = await broker.get_portfolio()
+            for pos in portfolio.positions:
+                close_ord = Order(
+                    symbol=pos.symbol,
+                    side=Side.SELL if pos.side == Side.BUY else Side.BUY,
+                    order_type=OrderType.MARKET,
+                    quantity=pos.quantity,
+                    price=pos.current_price,
+                )
+                await broker.place_order(close_ord)
+            console.print(f"[bold green]Market close square-off complete. Final P&L: ₹{goal_mgr.realized_pnl:+.2f}[/bold green]")
+            return
 
         # Fetch latest market data
         try:

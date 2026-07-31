@@ -318,6 +318,43 @@ def test_dual_speed_llm_config():
     assert getattr(effort_map, "portfolio_manager", "low") == "high"
 
 
+def test_market_hours_and_holidays():
+    """Test timezone conversion, weekend rejection, and official holiday checks."""
+    from datetime import date, datetime
+    from src.core.market_hours import is_trading_day, get_market_status, get_ist_now
+
+    # 1. IST Timezone check
+    ist_dt = get_ist_now()
+    assert ist_dt.tzinfo is not None
+    assert "Kolkata" in str(ist_dt.tzinfo)
+
+    # 2. Weekend check (Saturday 2026-08-01, Sunday 2026-08-02)
+    is_sat, sat_reason = is_trading_day(date(2026, 8, 1))
+    assert is_sat is False
+    assert "Saturday" in sat_reason
+
+    is_sun, sun_reason = is_trading_day(date(2026, 8, 2))
+    assert is_sun is False
+    assert "Sunday" in sun_reason
+
+    # 3. Official Holiday check (Republic Day 2026-01-26, Independence Day 2026-08-15)
+    is_rep, rep_reason = is_trading_day(date(2026, 1, 26))
+    assert is_rep is False
+    assert "Republic Day" in rep_reason
+
+    # 4. Regular weekday check (Monday 2026-08-03)
+    is_mon, mon_reason = is_trading_day(date(2026, 8, 3))
+    assert is_mon is True
+    assert mon_reason == "Trading Day"
+
+    # 5. Market status structure check
+    status = get_market_status()
+    assert "status" in status
+    assert "is_trading_day" in status
+    assert "is_open" in status
+    assert "ist_time" in status
+
+
 def test_market_context_has_vix_and_benchmark_fields():
     """Test that MarketContext model accepts VIX and benchmark data."""
     candle = Candle(

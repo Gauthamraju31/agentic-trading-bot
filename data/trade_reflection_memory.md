@@ -46,3 +46,27 @@ _Persistent lessons from past trades. Each entry records the decision, outcome, 
 
 ---
 
+## [2026-07-31 21:10] RELIANCE — BUY → FAILURE
+- Entry: ₹2500.00 → Exit: ₹2502.50 | P&L: +0.10%
+- **Reflection:** The BUY on RELIANCE resulted in a loss. Review: Test decision. Potential causes: wrong timing, insufficient conviction threshold, or adverse macro conditions. Consider tighter stops next time.
+
+---
+
+## [2026-07-31 21:10] RELIANCE — BUY → SUCCESS
+- Entry: ₹1300.00 → Exit: ₹1319.50 | P&L: +1.50% | Alpha vs NIFTY: +0.50%
+- **Reflection:** The BUY on RELIANCE was correct and beat the benchmark. Key factors: Alpha test trade. Continue monitoring similar setups when indicators align.
+
+---
+
+## [2026-07-31 21:11] RELIANCE — BUY → FAILURE
+- Entry: ₹2500.00 → Exit: ₹2502.50 | P&L: +0.10%
+- **Reflection:** The BUY on RELIANCE resulted in a loss. Review: Test decision. Potential causes: wrong timing, insufficient conviction threshold, or adverse macro conditions. Consider tighter stops next time.
+
+---
+
+## [2026-07-31 21:11] RELIANCE — BUY → SUCCESS
+- Entry: ₹1300.00 → Exit: ₹1319.50 | P&L: +1.50% | Alpha vs NIFTY: +0.50%
+- **Reflection:** The BUY on RELIANCE was correct and beat the benchmark. Key factors: Alpha test trade. Continue monitoring similar setups when indicators align.
+
+---
+
