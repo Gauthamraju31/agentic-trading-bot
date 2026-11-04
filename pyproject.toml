@@ -21,7 +21,8 @@ dependencies = [
     "yfinance>=0.2.38",
 
     # Database
-    "sqlalchemy>=2.0",
+    "sqlalchemy[asyncio]>=2.0",
+    "greenlet>=3.0",
     "aiosqlite>=0.20",
 
     # Agent / LLM
