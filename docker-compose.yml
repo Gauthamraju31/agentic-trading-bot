@@ -3,15 +3,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        USER_ID: 1001
+        GROUP_ID: 1001
     container_name: trading-bot-daemon
     restart: unless-stopped
     command: ["python", "scripts/run_daily_bot.py"]
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      # Mount host agy CLI binary and authentication data
+      - ~/.local/bin/agy:/usr/local/bin/agy:ro
+      - ~/.gemini:/home/trader/.gemini
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - HOME=/home/trader
     env_file:
       - path: .env
         required: false
@@ -20,6 +27,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        USER_ID: 1001
+        GROUP_ID: 1001
     container_name: trading-bot-dashboard
     restart: unless-stopped
     command: ["uvicorn", "src.dashboard.app:app", "--host", "0.0.0.0", "--port", "8080"]
@@ -29,9 +39,13 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      # Mount host agy CLI binary and authentication data
+      - ~/.local/bin/agy:/usr/local/bin/agy:ro
+      - ~/.gemini:/home/trader/.gemini
     environment:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
+      - HOME=/home/trader
     env_file:
       - path: .env
         required: false

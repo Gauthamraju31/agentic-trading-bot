@@ -4,7 +4,9 @@ FROM python:3.12-slim
 # Prevent Python from writing .pyc files and enable unbuffered logging
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    HOME=/home/trader \
+    USER=trader
 
 WORKDIR /app
 
@@ -27,11 +29,15 @@ COPY config/ /app/config/
 COPY data/ /app/data/
 COPY tests/ /app/tests/
 
-# Create non-root trader user and set permissions
-RUN useradd -m -u 1000 trader \
-    && chown -R trader:trader /app
+# Create non-root trader user matching host UID/GID (default 1001:1001 for ubuntu)
+ARG USER_ID=1001
+ARG GROUP_ID=1001
+RUN (getent group ${GROUP_ID} || groupadd -g ${GROUP_ID} trader) \
+    && (id -u ${USER_ID} >/dev/null 2>&1 || useradd -m -u ${USER_ID} -g ${GROUP_ID} trader) \
+    && mkdir -p /home/trader/.gemini \
+    && chown -R ${USER_ID}:${GROUP_ID} /app /home/trader
 
-USER trader
+USER ${USER_ID}
 
 # Default to running the trading bot daemon
 CMD ["python", "scripts/run_daily_bot.py"]
