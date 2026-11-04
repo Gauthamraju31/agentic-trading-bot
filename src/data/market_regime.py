@@ -74,8 +74,11 @@ class MarketRegimeDetector:
             adx = _safe_float(latest.get("ADX_14"), 20.0)
             supertrend_dir = _safe_float(latest.get("SUPERTREND_DIR"), 0.0)
 
-            # Calculate day range / trend strength
-            day_open = float(df["open"].iloc[0])
+            # Calculate today's intraday return from session open
+            df["ts_dt"] = pd.to_datetime(df["timestamp"])
+            session_date = df["ts_dt"].iloc[-1].date()
+            today_bars = df[df["ts_dt"].dt.date == session_date]
+            day_open = float(today_bars["open"].iloc[0]) if not today_bars.empty else float(df["open"].iloc[-1])
             day_return_pct = ((close - day_open) / day_open) * 100.0
 
             # Classification logic
