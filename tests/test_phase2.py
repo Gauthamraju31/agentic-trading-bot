@@ -10,7 +10,7 @@ from src.data.market_regime import MarketRegime, MarketRegimeDetector
 from src.data.scanner import MarketScanner
 
 
-def generate_mock_candles(trend: str = "bullish", n: int = 40) -> list[Candle]:
+def generate_mock_candles(trend: str = "bullish", n: int = 60) -> list[Candle]:
     """Helper to generate realistic candles for testing."""
     candles = []
     base_price = 24000.0 if trend != "bearish" else 24300.0
@@ -49,7 +49,7 @@ def generate_mock_candles(trend: str = "bullish", n: int = 40) -> list[Candle]:
 @pytest.mark.asyncio
 async def test_regime_detector_bullish():
     detector = MarketRegimeDetector()
-    detector.feed.get_historical_candles = AsyncMock(return_value=generate_mock_candles("bullish", 40))
+    detector.feed.get_historical_candles = AsyncMock(return_value=generate_mock_candles("bullish", 60))
 
     regime, details = await detector.get_current_regime(force_refresh=True)
     assert regime == MarketRegime.BULLISH_TREND
@@ -67,7 +67,7 @@ async def test_regime_detector_bullish():
 @pytest.mark.asyncio
 async def test_regime_detector_bearish():
     detector = MarketRegimeDetector()
-    detector.feed.get_historical_candles = AsyncMock(return_value=generate_mock_candles("bearish", 40))
+    detector.feed.get_historical_candles = AsyncMock(return_value=generate_mock_candles("bearish", 60))
 
     regime, details = await detector.get_current_regime(force_refresh=True)
     assert regime == MarketRegime.BEARISH_TREND

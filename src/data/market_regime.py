@@ -61,12 +61,17 @@ class MarketRegimeDetector:
             df_ind = IndicatorEngine.calculate(df)
             latest = df_ind.iloc[-1]
 
+            def _safe_float(val, default_val):
+                if val is None or pd.isna(val):
+                    return default_val
+                return float(val)
+
             close = float(latest["close"])
-            ema_20 = float(latest.get("EMA_20", close))
-            ema_50 = float(latest.get("EMA_50", close))
-            rsi = float(latest.get("RSI_14", 50.0))
-            adx = float(latest.get("ADX_14", 20.0))
-            supertrend = float(latest.get("SUPERTREND", 0.0))
+            ema_20 = _safe_float(latest.get("EMA_20"), close)
+            ema_50 = _safe_float(latest.get("EMA_50"), ema_20)
+            rsi = _safe_float(latest.get("RSI_14"), 50.0)
+            adx = _safe_float(latest.get("ADX_14"), 20.0)
+            supertrend = _safe_float(latest.get("SUPERTREND"), 0.0)
 
             # Calculate day range / trend strength
             day_open = float(df["open"].iloc[0])
