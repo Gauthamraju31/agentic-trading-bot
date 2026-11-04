@@ -93,6 +93,9 @@ class BacktestEngine:
         # Internal state tracking
         candles_history: list[Candle] = []
         equity_curve: list[float] = [self.initial_capital]
+        # Precompute indicators across full history once (vectorized, no look-ahead)
+        all_indicators_df = self.indicator_engine.calculate(candles_df)
+
         # Indicators computed through the PREVIOUS bar (None until enough history).
         prev_indicators = None
 
@@ -139,9 +142,8 @@ class BacktestEngine:
             # 4. Append current bar to history and recompute indicators THROUGH bar i,
             #    to be used as `prev_indicators` on the next iteration.
             candles_history.append(current_candle)
-            indicators = self.indicator_engine.calculate(candles_df.iloc[:i + 1])
-            if len(indicators) >= 15:
-                prev_indicators = self.indicator_engine.get_latest_indicators(indicators)
+            if i >= 14:
+                prev_indicators = self.indicator_engine.get_latest_indicators(all_indicators_df.iloc[i:i + 1])
 
         # Post-loop: Close out any remaining open position at the last close.
         open_pos = self.broker.positions.get(symbol)

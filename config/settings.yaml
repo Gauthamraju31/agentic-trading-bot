@@ -1,154 +1,103 @@
-# ============================================================
-# Trading Bot Configuration
-# ============================================================
-
 app:
-  name: "TradingBot"
-  mode: "mock"  # mock | live
-  log_level: "INFO"
-  data_dir: "data"
-
-# ------------------------------------------------------------
-# Market Configuration
-# ------------------------------------------------------------
+  name: TradingBot
+  mode: mock
+  log_level: INFO
+  data_dir: data
 market:
-  exchange: "NSE"
+  exchange: NSE
   symbols:
-    - "RELIANCE"
-    - "TCS"
-    - "INFY"
-    - "HDFCBANK"
-    - "ICICIBANK"
-    - "SBIN"
-    - "BAJFINANCE"
-    - "ITC"
-    - "KOTAKBANK"
-    - "LT"
+  - RELIANCE
+  - TCS
+  - INFY
+  - HDFCBANK
+  - ICICIBANK
+  - SBIN
+  - BAJFINANCE
+  - ITC
+  - KOTAKBANK
+  - LT
   indices:
-    - "NIFTY 50"
-    - "NIFTY BANK"
-  timeframe: "5m"  # primary analysis timeframe
+  - NIFTY 50
+  - NIFTY BANK
+  timeframe: 5m
   trading_hours:
-    start: "09:15"
-    end: "15:30"
-    pre_open_start: "09:00"
-    timezone: "Asia/Kolkata"
-
-# ------------------------------------------------------------
-# Mock Trading Configuration
-# ------------------------------------------------------------
+    start: 09:15
+    end: '15:30'
+    pre_open_start: 09:00
+    timezone: Asia/Kolkata
 mock:
-  initial_capital: 10000    # ₹10,000 starting budget for paper trading
-  slippage_pct: 0.05        # 0.05% slippage per fill
-  brokerage_per_order: 20   # ₹20 flat per executed order
-
-# ------------------------------------------------------------
-# Risk Management
-# ------------------------------------------------------------
+  initial_capital: 100000
+  slippage_pct: 0.05
+  brokerage_per_order: 20
 risk:
-  max_position_pct: 35.0      # max 35% of capital per position (allows 1 share of ~3k stocks on 10k capital)
-  max_daily_loss_pct: 3.0     # halt trading if daily loss exceeds 3% (₹300)
-  max_open_positions: 3       # maximum concurrent open positions
-  default_stop_loss_pct: 2.0  # default 2% stop-loss from entry
-  risk_per_trade_pct: 2.0     # risk at most 2% of total capital per trade (₹200)
-  position_sizing: "fixed_fractional"  # fixed_fractional | kelly | half_kelly
-  trailing_stop_atr_multiplier: 2.0    # trailing stop = 2x ATR
-
-# ------------------------------------------------------------
-# Indian Market Fee Structure (2026)
-# ------------------------------------------------------------
+  max_position_pct: 30.0
+  max_daily_loss_pct: 2.0
+  max_open_positions: 3
+  default_stop_loss_pct: 2.0
+  risk_per_trade_pct: 1.0
+  position_sizing: fixed_fractional
+  trailing_stop_atr_multiplier: 2.0
 fees:
-  brokerage_per_order: 20              # ₹20 flat (most discount brokers)
-  stt_delivery_pct: 0.1                # STT on BOTH buy & sell for delivery (CNC)
-  stt_intraday_sell_pct: 0.025         # STT on sell-side only for intraday (MIS)
-  exchange_charges_pct: 0.00297        # NSE equity transaction charges
-  gst_pct: 18.0                        # GST on (brokerage + exchange + SEBI charges)
-  sebi_charges_pct: 0.0001             # SEBI turnover fee (₹10 per crore)
-  stamp_duty_delivery_buy_pct: 0.015   # Stamp duty, buy-side, delivery
-  stamp_duty_intraday_buy_pct: 0.003   # Stamp duty, buy-side, intraday
-
-# ------------------------------------------------------------
-# AI Agent Configuration
-# ------------------------------------------------------------
+  brokerage_per_order: 20
+  stt_delivery_pct: 0.1
+  stt_intraday_sell_pct: 0.025
+  exchange_charges_pct: 0.00297
+  gst_pct: 18.0
+  sebi_charges_pct: 0.0001
+  stamp_duty_delivery_buy_pct: 0.015
+  stamp_duty_intraday_buy_pct: 0.003
 agents:
-  # LLM backend for the multi-agent pipeline. "agy" = the Antigravity CLI
-  # (headless, via `agy -p`). It requires a ONE-TIME interactive sign-in on the
-  # host: run `agy` with no arguments and complete the login. Until then, agents
-  # fall back to deterministic logic (logged loudly at WARNING).
-  # Alternatives: "gemini"/"openai" (need an API key in env), or "mock".
-  llm_provider: "agy"             # agy | gemini | openai | antigravity | mock
-  model_name: "gemini-2.5-flash"  # used only by the gemini/openai backends
-  agy_model: ""                   # optional agy model id (empty = agy default)
-  agy_effort: "low"               # default reasoning effort per call
-  # Dual-speed LLM: heavy reasoning for debate/decisions, fast for scanning
+  llm_provider: agy
+  model_name: gemini-2.5-flash
+  agy_model: ''
+  agy_effort: low
   agy_effort_per_role:
-    technical_analyst: "low"       # quick indicator summary
-    sentiment_analyst: "low"       # headline parsing
-    bull: "medium"                 # deep reasoning for thesis
-    bear: "medium"                 # deep reasoning for counter-thesis
-    risk_manager: "low"            # deterministic checks mostly
-    portfolio_manager: "high"      # final decision needs full reasoning
-    market_selector: "low"         # quick scan
-  llm_timeout_secs: 120           # per-call timeout for the agy CLI
-  temperature: 0.3                # low temperature for consistent decisions
-  debate_rounds: 2                # bull vs bear debate rounds (>=1)
-  min_confidence: 0.6             # minimum confidence threshold to act (else HOLD)
-  max_retries: 3                  # structured-output parse/validate retries
-  max_rpd: 1000                   # LLM requests per day cap
-  max_rpm: 30                     # LLM requests per minute cap
-
-# ------------------------------------------------------------
-# Backtesting Configuration
-# ------------------------------------------------------------
+    technical_analyst: low
+    sentiment_analyst: low
+    bull: medium
+    bear: medium
+    risk_manager: low
+    portfolio_manager: high
+    market_selector: low
+  llm_timeout_secs: 120
+  temperature: 0.3
+  debate_rounds: 2
+  min_confidence: 0.6
+  max_retries: 3
+  max_rpd: 1000
+  max_rpm: 30
 backtest:
-  start_date: "2024-01-01"
-  end_date: "2025-12-31"
+  start_date: '2024-01-01'
+  end_date: '2025-12-31'
   walk_forward:
-    in_sample_days: 180    # 6 months optimization window
-    out_sample_days: 30    # 1 month validation window
-  benchmark: "NIFTY 50"
+    in_sample_days: 180
+    out_sample_days: 30
+  benchmark: NIFTY 50
   initial_capital: 1000000
-
-# ------------------------------------------------------------
-# Self-Learning & Reflection Memory
-# ------------------------------------------------------------
 learning:
-  reflection_memory_file: "data/trade_reflection_memory.md"
-  max_reflections_in_prompt: 5    # inject up to N recent reflections into PM prompt
-  alpha_benchmark: "NIFTY 50"     # track alpha vs this index
-
-# ------------------------------------------------------------
-# India VIX Integration
-# ------------------------------------------------------------
+  reflection_memory_file: data/trade_reflection_memory.md
+  max_reflections_in_prompt: 5
+  alpha_benchmark: NIFTY 50
 vix:
   enabled: true
-  high_vix_threshold: 18.0        # reduce position sizes when VIX > 18
-  halt_vix_threshold: 25.0        # halt new trades when VIX > 25
-  ticker: "^INDIAVIX"             # Yahoo Finance India VIX ticker
-
-# ------------------------------------------------------------
-# Daily Profit Goal & Risk Limits
-# ------------------------------------------------------------
+  high_vix_threshold: 18.0
+  halt_vix_threshold: 25.0
+  ticker: ^INDIAVIX
 daily_goal:
-  target_profit: 100.0      # Stop trading for the day when net profit >= ₹100
-  max_loss: 200.0           # Stop trading for the day when net loss >= ₹200
+  target_profit: 1500.0
+  max_loss: 1000.0
   auto_stop_on_target: true
-  pre_market_start: "09:00"
-  market_open: "09:15"
-  market_close: "15:30"
-
-# ------------------------------------------------------------
-# Dashboard & Alerts
-# ------------------------------------------------------------
+  pre_market_start: 09:00
+  market_open: 09:15
+  market_close: '15:30'
 dashboard:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8080
   auto_refresh_seconds: 5
-
 alerts:
   telegram_enabled: false
-  telegram_bot_token: ""
-  telegram_chat_id: ""
+  telegram_bot_token: ''
+  telegram_chat_id: ''
   email_enabled: false
-  email_smtp_host: ""
-  email_to: ""
+  email_smtp_host: ''
+  email_to: ''
