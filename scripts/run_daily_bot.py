@@ -506,7 +506,11 @@ class AutonomousTradingBot:
                 else:
                     if self.broker.positions:
                         await self.auto_squareoff()
-                    logger.info(f"[Daemon] Market closed for today. Realized P&L: ₹{self.goal_mgr.realized_pnl:+.2f}. Resting...")
+                    logger.info(
+                        f"[Daemon] Market closed ({now_ist.strftime('%I:%M %p')} IST). "
+                        f"Realized P&L: ₹{self.goal_mgr.realized_pnl:+.2f}. "
+                        "Next active session at 08:45 AM IST. Resting (10m keep-alive)..."
+                    )
                     self.update_heartbeat("RUNNING", 600)
                     await asyncio.sleep(600)
                     continue
