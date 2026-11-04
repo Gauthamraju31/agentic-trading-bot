@@ -11,9 +11,12 @@ Architecture:
 
 import argparse
 import asyncio
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
+import json
+import os
 from pathlib import Path
 import sys
+import time as time_mod
 from typing import Dict, List, Optional
 
 # Ensure project root is in python path
@@ -23,6 +26,10 @@ from loguru import logger
 import pandas as pd
 from rich.console import Console
 from rich.panel import Panel
+
+# Configure persistent file logging for dashboard & audit
+Path("data").mkdir(exist_ok=True)
+logger.add("data/bot.log", rotation="10 MB", retention="5 days", level="INFO", enqueue=True)
 
 from src.agents.pre_market_planner import PreMarketPlanner
 from src.agents.trade_memory import TradeReflectionMemory
@@ -76,6 +83,32 @@ class AutonomousTradingBot:
         self.active_stops: Dict[str, Dict] = {}
         self.pre_market_done_for_date: str = ""
         self.post_market_done_for_date: str = ""
+
+    def update_heartbeat(self, status: str = "RUNNING", sleep_interval: int = 15):
+        try:
+            Path("data").mkdir(exist_ok=True)
+            with open("data/bot_heartbeat.json", "w") as f:
+                json.dump({
+                    "status": status,
+                    "pid": os.getpid(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "last_seen_epoch": time_mod.time(),
+                    "sleep_interval": sleep_interval,
+                    "realized_pnl": self.goal_mgr.realized_pnl,
+                    "watchlist": self.watchlist,
+                }, f)
+        except Exception:
+            pass
+
+    def check_control_signal(self) -> str:
+        try:
+            ctrl_file = Path("data/bot_control.json")
+            if ctrl_file.exists():
+                with open(ctrl_file, "r") as f:
+                    return json.load(f).get("action", "RESUME")
+        except Exception:
+            pass
+        return "RESUME"
 
     def log_banner(self):
         now_ist = get_ist_now()
@@ -401,15 +434,30 @@ class AutonomousTradingBot:
     async def run(self):
         """Main autonomous daemon loop."""
         self.log_banner()
+        self.update_heartbeat("RUNNING", self.loop_interval)
 
         if self.test_mode:
             logger.info("Running single test mode iteration...")
             await self.execute_trading_tick()
+            self.update_heartbeat("STOPPED", 0)
             self.console.print("[bold green]✔ Test iteration completed successfully.[/bold green]")
             return
 
         while True:
             try:
+                ctrl_signal = self.check_control_signal()
+                if ctrl_signal == "KILL":
+                    logger.warning("[Daemon] KILL signal received from Control Center! Squaring off and halting...")
+                    await self.auto_squareoff()
+                    self.update_heartbeat("STOPPED", 30)
+                    await asyncio.sleep(30)
+                    continue
+                elif ctrl_signal == "PAUSE":
+                    logger.info("[Daemon] PAUSE signal active from Control Center. Resting...")
+                    self.update_heartbeat("PAUSED", 15)
+                    await asyncio.sleep(15)
+                    continue
+
                 now_ist = get_ist_now()
                 current_time = now_ist.time()
                 today_str = now_ist.strftime("%Y-%m-%d")
@@ -418,17 +466,20 @@ class AutonomousTradingBot:
                 # Weekend / Holiday Check
                 if not mkt_status["is_trading_day"]:
                     logger.info(f"[Daemon] Market closed ({mkt_status['reason']}). Sleeping for 30 minutes...")
+                    self.update_heartbeat("RUNNING", 1800)
                     await asyncio.sleep(1800)
                     continue
 
                 # Pre-Market Window: 08:45 - 09:14 IST
                 if time(8, 45) <= current_time < time(9, 15):
+                    self.update_heartbeat("RUNNING", 60)
                     await self.run_pre_market_phase(today_str)
                     await asyncio.sleep(60)
                     continue
 
                 # Live Market Hours: 09:15 - 15:20 IST
                 elif time(9, 15) <= current_time < time(15, 20):
+                    self.update_heartbeat("RUNNING", self.loop_interval)
                     await self.execute_trading_tick()
 
                 # Square-off Window: 15:20 - 15:30 IST
@@ -436,6 +487,7 @@ class AutonomousTradingBot:
                     if self.broker.positions:
                         logger.warning("[Daemon] Approaching 15:30 IST market close. Squaring off open positions...")
                         await self.auto_squareoff()
+                    self.update_heartbeat("RUNNING", 60)
                     await asyncio.sleep(60)
                     continue
 
@@ -446,6 +498,7 @@ class AutonomousTradingBot:
                     if current_time >= time(15, 45):
                         await self.run_post_market_phase(today_str)
                     logger.info(f"[Daemon] Post-Market Session. Realized P&L: ₹{self.goal_mgr.realized_pnl:+.2f}. Resting...")
+                    self.update_heartbeat("RUNNING", 600)
                     await asyncio.sleep(600)
                     continue
 
@@ -454,12 +507,14 @@ class AutonomousTradingBot:
                     if self.broker.positions:
                         await self.auto_squareoff()
                     logger.info(f"[Daemon] Market closed for today. Realized P&L: ₹{self.goal_mgr.realized_pnl:+.2f}. Resting...")
+                    self.update_heartbeat("RUNNING", 600)
                     await asyncio.sleep(600)
                     continue
 
             except Exception as e:
                 logger.error(f"[DailyBot] Unhandled error in execution cycle: {e}")
 
+            self.update_heartbeat("RUNNING", self.loop_interval)
             await asyncio.sleep(self.loop_interval)
 
 

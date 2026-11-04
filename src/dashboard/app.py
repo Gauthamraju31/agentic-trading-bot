@@ -2,9 +2,13 @@
 
 import asyncio
 from datetime import datetime
+import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+import time
 from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -25,56 +29,115 @@ app = FastAPI(title="Agentic Trading Bot — Control Center")
 
 
 def get_service_status() -> tuple[bool, str]:
-    """Check actual systemd status of tradingbot.service."""
-    try:
-        res = subprocess.run(
-            ["systemctl", "is-active", "tradingbot.service"],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        is_active = res.stdout.strip() == "active"
-        return is_active, "RUNNING" if is_active else "STOPPED"
-    except Exception:
-        return False, "STOPPED"
+    """Check whether the autonomous trading daemon is active via heartbeat or systemctl."""
+    heartbeat_file = Path("data/bot_heartbeat.json")
+    if heartbeat_file.exists():
+        try:
+            with open(heartbeat_file, "r") as f:
+                data = json.load(f)
+            last_seen = data.get("last_seen_epoch", 0)
+            sleep_int = data.get("sleep_interval", 15)
+            # If heartbeat was updated within sleep_interval + 180s tolerance
+            if time.time() - last_seen < (sleep_int + 180):
+                status_str = data.get("status", "RUNNING")
+                return (status_str == "RUNNING"), status_str
+        except Exception:
+            pass
+
+    if shutil.which("systemctl"):
+        try:
+            res = subprocess.run(
+                ["systemctl", "is-active", "tradingbot.service"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            is_active = res.stdout.strip() == "active"
+            return is_active, "RUNNING" if is_active else "STOPPED"
+        except Exception:
+            pass
+
+    return False, "STOPPED"
 
 
 def get_daemon_logs(limit: int = 50) -> list[dict]:
-    """Extract real-time execution logs from journalctl."""
-    try:
-        res = subprocess.run(
-            ["journalctl", "-u", "tradingbot.service", "-n", str(limit), "--no-pager"],
-            capture_output=True,
-            text=True,
-            timeout=4,
-        )
-        lines = res.stdout.strip().split("\n")
-        parsed = []
-        for line in lines:
-            if not line.strip():
-                continue
-            parts = line.split("openclaw-server")
-            if len(parts) > 1:
-                ts = parts[0].strip()
-                msg = parts[1].split("]:", 1)[-1].strip() if "]:" in parts[1] else parts[1].strip()
-            else:
-                ts = line[:15]
-                msg = line[15:].strip()
+    """Extract real-time execution logs from data/bot.log with fallback to journalctl."""
+    log_file = Path("data/bot.log")
+    if log_file.exists():
+        try:
+            with open(log_file, "r") as f:
+                raw_lines = f.readlines()
+            parsed = []
+            for line in raw_lines[-limit:]:
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split(" | ")
+                if len(parts) >= 3:
+                    ts = parts[0].strip()
+                    lvl = parts[1].strip()
+                    msg = " | ".join(parts[2:]).strip()
+                    if " - " in msg:
+                        msg = msg.split(" - ", 1)[-1].strip()
+                else:
+                    ts = line[:19]
+                    lvl = "INFO"
+                    msg = line[19:].strip()
 
-            lvl = "INFO"
-            if "ERROR" in msg or "Exception" in msg:
-                lvl = "ERROR"
-            elif "WARNING" in msg:
-                lvl = "WARNING"
-            elif "ORDER FILLED" in msg or "SUCCESS" in msg or "completed successfully" in msg:
-                lvl = "SUCCESS"
-            elif "Signal:" in msg:
-                lvl = "SIGNAL"
+                if "ERROR" in lvl or "Exception" in msg:
+                    lvl = "ERROR"
+                elif "WARNING" in lvl:
+                    lvl = "WARNING"
+                elif "ORDER FILLED" in msg or "SUCCESS" in msg or "completed successfully" in msg:
+                    lvl = "SUCCESS"
+                elif "Signal:" in msg:
+                    lvl = "SIGNAL"
+                else:
+                    lvl = "INFO"
 
-            parsed.append({"timestamp": ts, "message": msg, "level": lvl})
-        return parsed
-    except Exception as e:
-        return [{"timestamp": "now", "message": f"Log fetch error: {e}", "level": "WARNING"}]
+                parsed.append({"timestamp": ts, "message": msg, "level": lvl})
+            if parsed:
+                return parsed
+        except Exception as e:
+            logger.warning(f"Failed to read bot.log: {e}")
+
+    if shutil.which("journalctl"):
+        try:
+            res = subprocess.run(
+                ["journalctl", "-u", "tradingbot.service", "-n", str(limit), "--no-pager"],
+                capture_output=True,
+                text=True,
+                timeout=4,
+            )
+            lines = res.stdout.strip().split("\n")
+            parsed = []
+            for line in lines:
+                if not line.strip():
+                    continue
+                parts = line.split("openclaw-server")
+                if len(parts) > 1:
+                    ts = parts[0].strip()
+                    msg = parts[1].split("]:", 1)[-1].strip() if "]:" in parts[1] else parts[1].strip()
+                else:
+                    ts = line[:15]
+                    msg = line[15:].strip()
+
+                lvl = "INFO"
+                if "ERROR" in msg or "Exception" in msg:
+                    lvl = "ERROR"
+                elif "WARNING" in msg:
+                    lvl = "WARNING"
+                elif "ORDER FILLED" in msg or "SUCCESS" in msg or "completed successfully" in msg:
+                    lvl = "SUCCESS"
+                elif "Signal:" in msg:
+                    lvl = "SIGNAL"
+
+                parsed.append({"timestamp": ts, "message": msg, "level": lvl})
+            return parsed
+        except Exception as e:
+            return [{"timestamp": "now", "message": f"Log fetch error: {e}", "level": "WARNING"}]
+
+    return [{"timestamp": "now", "message": "Bot daemon logging initialized. Waiting for trade tick...", "level": "INFO"}]
 
 
 HTML_TEMPLATE = """<!DOCTYPE html>
@@ -977,40 +1040,57 @@ async def get_logs_endpoint():
     return get_daemon_logs(50)
 
 
+def set_bot_control(action: str):
+    try:
+        Path("data").mkdir(exist_ok=True)
+        with open("data/bot_control.json", "w") as f:
+            json.dump({"action": action, "timestamp": time.time()}, f)
+    except Exception as e:
+        logger.error(f"Failed to write bot_control.json: {e}")
+
+
 @app.post("/api/control/start")
 async def start_bot_control():
-    try:
-        subprocess.run(["sudo", "systemctl", "start", "tradingbot.service"], check=True, timeout=5)
-        return {"status": "started", "message": "Autonomous trading bot service started successfully."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    set_bot_control("RESUME")
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(["sudo", "systemctl", "start", "tradingbot.service"], check=False, timeout=5)
+        except Exception:
+            pass
+    return {"status": "started", "message": "Autonomous trading bot instructed to RESUME."}
 
 
 @app.post("/api/control/stop")
 async def stop_bot_control():
-    try:
-        subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=True, timeout=5)
-        return {"status": "stopped", "message": "Autonomous trading bot service stopped."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    set_bot_control("PAUSE")
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=False, timeout=5)
+        except Exception:
+            pass
+    return {"status": "stopped", "message": "Autonomous trading bot instructed to PAUSE."}
 
 
 @app.post("/api/control/restart")
 async def restart_bot_control():
-    try:
-        subprocess.run(["sudo", "systemctl", "restart", "tradingbot.service"], check=True, timeout=5)
-        return {"status": "restarted", "message": "Autonomous trading bot service restarted."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    set_bot_control("RESUME")
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(["sudo", "systemctl", "restart", "tradingbot.service"], check=False, timeout=5)
+        except Exception:
+            pass
+    return {"status": "restarted", "message": "Autonomous trading bot restarted."}
 
 
 @app.post("/api/control/kill-switch")
 async def trigger_kill_switch():
-    try:
-        subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=True, timeout=5)
-        return {"status": "killed", "message": "Emergency Kill Switch activated: Service halted."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    set_bot_control("KILL")
+    if shutil.which("systemctl"):
+        try:
+            subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=False, timeout=5)
+        except Exception:
+            pass
+    return {"status": "killed", "message": "Emergency Kill Switch activated: All positions square-off requested."}
 
 
 @app.get("/api/daily-goal")
