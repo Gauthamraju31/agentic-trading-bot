@@ -3,8 +3,8 @@
 import asyncio
 from datetime import datetime
 from pathlib import Path
+import subprocess
 import sys
-import threading
 from typing import Any, Dict, List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
@@ -17,159 +17,222 @@ import uvicorn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from src.core.config import settings
-from src.core.enums import Exchange, OrderType, Side, SignalAction, TimeFrame
-from src.core.models import MarketContext, Order, Position, Trade
+from src.core.daily_goal_manager import DailyGoalManager
+from src.core.market_hours import get_ist_now, get_market_status
+from src.agents.pre_market_planner import PreMarketPlanner
 
-app = FastAPI(title="Trading Bot Control Center")
-
-# Global state for bot process control & UI state
-bot_state = {
-    "status": "STOPPED",  # STOPPED | RUNNING | PAUSED | CIRCUIT_BROKEN
-    "mode": "mock",  # mock | live
-    "symbol": "RELIANCE",
-    "strategy": "multi_agent",  # multi_agent | momentum | mean_reversion
-    "interval": 2,
-    "circuit_breaker_active": False,
-    "equity": settings.mock.initial_capital,
-    "initial_capital": settings.mock.initial_capital,
-    "cash": settings.mock.initial_capital,
-    "realized_pnl": 0.0,
-    "unrealized_pnl": 0.0,
-    "max_drawdown_pct": 0.0,
-    "win_rate": 0.0,
-    "positions": [],
-    "trades": [],
-    "logs": [],
-    "backtest_result": None,
-}
-
-bot_task: Optional[asyncio.Task] = None
-bot_loop_stop_event = asyncio.Event()
+app = FastAPI(title="Agentic Trading Bot — Control Center")
 
 
-def log_to_dashboard(msg: str, level: str = "INFO"):
-    """Append a log entry to the dashboard log stream."""
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    entry = {"timestamp": timestamp, "message": msg, "level": level}
-    bot_state["logs"].append(entry)
-    if len(bot_state["logs"]) > 200:
-        bot_state["logs"].pop(0)
+def get_service_status() -> tuple[bool, str]:
+    """Check actual systemd status of tradingbot.service."""
+    try:
+        res = subprocess.run(
+            ["systemctl", "is-active", "tradingbot.service"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        is_active = res.stdout.strip() == "active"
+        return is_active, "RUNNING" if is_active else "STOPPED"
+    except Exception:
+        return False, "STOPPED"
 
 
-HTML_TEMPLATE = """
-<!DOCTYPE html>
+def get_daemon_logs(limit: int = 50) -> list[dict]:
+    """Extract real-time execution logs from journalctl."""
+    try:
+        res = subprocess.run(
+            ["journalctl", "-u", "tradingbot.service", "-n", str(limit), "--no-pager"],
+            capture_output=True,
+            text=True,
+            timeout=4,
+        )
+        lines = res.stdout.strip().split("\n")
+        parsed = []
+        for line in lines:
+            if not line.strip():
+                continue
+            parts = line.split("openclaw-server")
+            if len(parts) > 1:
+                ts = parts[0].strip()
+                msg = parts[1].split("]:", 1)[-1].strip() if "]:" in parts[1] else parts[1].strip()
+            else:
+                ts = line[:15]
+                msg = line[15:].strip()
+
+            lvl = "INFO"
+            if "ERROR" in msg or "Exception" in msg:
+                lvl = "ERROR"
+            elif "WARNING" in msg:
+                lvl = "WARNING"
+            elif "ORDER FILLED" in msg or "SUCCESS" in msg or "completed successfully" in msg:
+                lvl = "SUCCESS"
+            elif "Signal:" in msg:
+                lvl = "SIGNAL"
+
+            parsed.append({"timestamp": ts, "message": msg, "level": lvl})
+        return parsed
+    except Exception as e:
+        return [{"timestamp": "now", "message": f"Log fetch error: {e}", "level": "WARNING"}]
+
+
+HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agentic Trading Bot — Control Center</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-color: #0f172a;
-            --card-bg: #1e293b;
-            --card-border: #334155;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-            --accent-green: #10b981;
-            --accent-red: #ef4444;
+            --bg-page: #0a0b10;
+            --bg-card: #12141c;
+            --bg-card-subtle: #181b26;
+            --border-card: #232738;
+            --border-hover: #333a52;
+            --text-primary: #ffffff;
+            --text-secondary: #9aa3b8;
+            --text-muted: #5e667d;
+            --emerald: #10b981;
+            --emerald-bg: rgba(16, 185, 129, 0.12);
+            --rose: #f43f5e;
+            --rose-bg: rgba(244, 63, 94, 0.12);
+            --amber: #f59e0b;
+            --amber-bg: rgba(245, 158, 11, 0.12);
+            --cyan: #06b6d4;
+            --cyan-bg: rgba(6, 182, 212, 0.12);
             --accent-blue: #3b82f6;
-            --accent-amber: #f59e0b;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
         }
 
         body {
-            font-family: 'Inter', sans-serif;
-            background-color: var(--bg-color);
-            color: var(--text-main);
-            margin: 0;
-            padding: 24px;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-page);
+            color: var(--text-primary);
+            min-height: 100vh;
+            padding: 24px 32px;
+            line-height: 1.5;
         }
 
-        .header {
+        .container {
+            max-width: 1440px;
+            margin: 0 auto;
+        }
+
+        /* Top Header */
+        header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding-bottom: 20px;
-            border-bottom: 1px solid var(--card-border);
-            margin-bottom: 24px;
-        }
-
-        .title-area h1 {
-            margin: 0;
-            font-size: 24px;
-            font-weight: 700;
-            color: #ffffff;
-        }
-
-        .title-area p {
-            margin: 4px 0 0 0;
-            color: var(--text-muted);
-            font-size: 13px;
-        }
-
-        .status-badge {
-            padding: 6px 16px;
-            border-radius: 20px;
-            font-weight: 600;
-            font-size: 13px;
-            letter-spacing: 0.5px;
-        }
-
-        .status-STOPPED { background: #475569; color: #f8fafc; }
-        .status-RUNNING { background: #065f46; color: #34d399; }
-        .status-PAUSED { background: #78350f; color: #fbbf24; }
-        .status-CIRCUIT_BROKEN { background: #7f1d1d; color: #f87171; }
-
-        .control-panel {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            padding: 20px;
-            margin-bottom: 24px;
-            display: flex;
-            flex-wrap: wrap;
+            padding-bottom: 24px;
+            border-bottom: 1px solid var(--border-card);
+            margin-bottom: 28px;
             gap: 16px;
-            align-items: center;
+            flex-wrap: wrap;
         }
 
-        .form-group {
+        .logo-area {
             display: flex;
-            flex-direction: column;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .brand-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            background: linear-gradient(135deg, #2563eb, #06b6d4);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            box-shadow: 0 4px 14px rgba(37, 99, 235, 0.35);
+        }
+
+        .brand-title h1 {
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.3px;
+        }
+
+        .brand-title p {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 600;
+            border: 1px solid transparent;
+        }
+
+        .pill-running {
+            background: var(--emerald-bg);
+            color: var(--emerald);
+            border-color: rgba(16, 185, 129, 0.3);
+        }
+
+        .pill-stopped {
+            background: var(--rose-bg);
+            color: var(--rose);
+            border-color: rgba(244, 63, 94, 0.3);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: currentColor;
+            box-shadow: 0 0 10px currentColor;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.4; transform: scale(0.85); }
+        }
+
+        .market-pill {
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            color: var(--text-secondary);
+            font-size: 12px;
+            padding: 6px 12px;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
             gap: 6px;
         }
 
-        .form-group label {
-            font-size: 12px;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-
-        select, input {
-            background: #0f172a;
-            border: 1px solid var(--card-border);
-            color: white;
-            padding: 8px 12px;
-            border-radius: 6px;
-            font-size: 14px;
-            outline: none;
-        }
-
-        select:focus, input:focus {
-            border-color: var(--accent-blue);
-        }
-
-        .btn-group {
-            display: flex;
-            gap: 10px;
-            margin-left: auto;
-        }
-
-        button {
-            border: none;
-            padding: 10px 18px;
-            border-radius: 6px;
-            font-weight: 600;
+        /* Buttons */
+        .btn {
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
+            color: var(--text-primary);
+            padding: 8px 16px;
+            border-radius: 8px;
             font-size: 13px;
+            font-weight: 600;
             cursor: pointer;
             transition: all 0.2s ease;
             display: inline-flex;
@@ -177,487 +240,654 @@ HTML_TEMPLATE = """
             gap: 6px;
         }
 
-        .btn-start { background: var(--accent-green); color: #022c22; }
-        .btn-start:hover { background: #059669; }
-        .btn-stop { background: var(--accent-amber); color: #451a03; }
-        .btn-stop:hover { background: #d97706; }
-        .btn-kill { background: var(--accent-red); color: #ffffff; }
-        .btn-kill:hover { background: #dc2626; }
-        .btn-action { background: #334155; color: #f8fafc; }
-        .btn-action:hover { background: #475569; }
+        .btn:hover {
+            border-color: var(--border-hover);
+            background: var(--bg-card-subtle);
+        }
 
+        .btn-primary {
+            background: #2563eb;
+            border-color: #2563eb;
+            color: white;
+        }
+        .btn-primary:hover {
+            background: #1d4ed8;
+            border-color: #1d4ed8;
+        }
+
+        .btn-danger {
+            background: transparent;
+            border-color: rgba(244, 63, 94, 0.4);
+            color: var(--rose);
+        }
+        .btn-danger:hover {
+            background: var(--rose-bg);
+            border-color: var(--rose);
+        }
+
+        /* Metrics Row */
         .metrics-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-
-        .metric-card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 10px;
-            padding: 16px;
-        }
-
-        .metric-card .title {
-            font-size: 12px;
-            color: var(--text-muted);
-            font-weight: 500;
-            text-transform: uppercase;
-        }
-
-        .metric-card .value {
-            font-size: 22px;
-            font-weight: 700;
-            margin-top: 8px;
-        }
-
-        .positive { color: var(--accent-green); }
-        .negative { color: var(--accent-red); }
-
-        .main-grid {
-            display: grid;
-            grid-template-columns: 2fr 1fr;
-            gap: 20px;
-            margin-bottom: 24px;
-        }
-
-        @media (max-width: 1024px) {
-            .main-grid { grid-template-columns: 1fr; }
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 18px;
+            margin-bottom: 28px;
         }
 
         .card {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
+            background: var(--bg-card);
+            border: 1px solid var(--border-card);
             border-radius: 12px;
             padding: 20px;
+            transition: border-color 0.2s ease;
         }
 
-        .card h2 {
-            margin: 0 0 16px 0;
-            font-size: 16px;
-            font-weight: 600;
-            color: #ffffff;
+        .card:hover {
+            border-color: var(--border-hover);
+        }
+
+        .card-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
+            margin-bottom: 12px;
         }
 
+        .card-title {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .card-value {
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            font-family: 'JetBrains Mono', monospace;
+            margin-bottom: 6px;
+        }
+
+        .card-sub {
+            font-size: 12px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .progress-bar-bg {
+            height: 6px;
+            background: var(--border-card);
+            border-radius: 3px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--emerald), var(--cyan));
+            border-radius: 3px;
+            transition: width 0.4s ease;
+        }
+
+        /* Main Workspace Split */
+        .workspace-grid {
+            display: grid;
+            grid-template-columns: 1.8fr 1.2fr;
+            gap: 22px;
+        }
+
+        @media (max-width: 1024px) {
+            .workspace-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* Terminal Window */
+        .terminal-box {
+            background: #07080c;
+            border: 1px solid var(--border-card);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            height: 520px;
+            overflow: hidden;
+        }
+
+        .terminal-topbar {
+            background: #0f1118;
+            border-bottom: 1px solid var(--border-card);
+            padding: 10px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .terminal-controls {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .terminal-body {
+            padding: 14px;
+            overflow-y: auto;
+            flex: 1;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+
+        .log-row {
+            display: flex;
+            gap: 12px;
+            padding: 2px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.02);
+        }
+
+        .log-ts {
+            color: var(--text-muted);
+            flex-shrink: 0;
+            font-size: 11px;
+        }
+
+        .log-msg {
+            color: #d1d5db;
+            word-break: break-all;
+        }
+
+        .log-SUCCESS { color: #34d399; }
+        .log-SIGNAL { color: #38bdf8; font-weight: 600; }
+        .log-WARNING { color: #fbbf24; }
+        .log-ERROR { color: #f87171; font-weight: 600; }
+
+        /* Tables */
         table {
             width: 100%;
             border-collapse: collapse;
             font-size: 13px;
         }
 
-        th, td {
-            text-align: left;
-            padding: 10px 12px;
-            border-bottom: 1px solid #2d3748;
-        }
-
         th {
+            text-align: left;
+            font-size: 11px;
+            text-transform: uppercase;
             color: var(--text-muted);
-            font-weight: 500;
-            background: #111827;
+            padding: 8px 12px;
+            border-bottom: 1px solid var(--border-card);
         }
 
-        .log-console {
-            background: #090d16;
-            border: 1px solid #1e293b;
-            border-radius: 8px;
+        td {
             padding: 12px;
-            height: 320px;
-            overflow-y: auto;
-            font-family: monospace;
-            font-size: 12px;
-            line-height: 1.6;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            font-family: 'JetBrains Mono', monospace;
         }
 
-        .log-entry { margin-bottom: 4px; }
-        .log-INFO { color: #94a3b8; }
-        .log-SUCCESS { color: #34d399; }
-        .log-WARNING { color: #fbbf24; }
-        .log-ERROR { color: #f87171; }
-
-        .modal-bg {
-            display: none;
-            position: fixed;
-            top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.7);
-            justify-content: center;
-            align-items: center;
-            z-index: 1000;
+        .empty-placeholder {
+            text-align: center;
+            padding: 36px 16px;
+            color: var(--text-muted);
+            font-size: 13px;
         }
-        .modal {
-            background: var(--card-bg);
-            border: 1px solid var(--card-border);
-            border-radius: 12px;
-            padding: 24px;
-            max-width: 500px;
+
+        /* Config Form */
+        .form-row {
+            display: flex;
+            gap: 12px;
+            margin-top: 14px;
+        }
+
+        .form-input-group {
+            flex: 1;
+        }
+
+        .form-input-group label {
+            display: block;
+            font-size: 11px;
+            color: var(--text-muted);
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .form-input {
             width: 100%;
+            background: #08090d;
+            border: 1px solid var(--border-card);
+            color: white;
+            padding: 9px 12px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-family: 'JetBrains Mono', monospace;
+            outline: none;
+        }
+
+        .form-input:focus {
+            border-color: var(--accent-blue);
+        }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: #1e293b;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 8px;
+            border: 1px solid var(--border-hover);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            font-size: 13px;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s ease;
+            pointer-events: none;
+        }
+
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <div class="title-area">
-            <h1>Agentic Trading Bot Control Center</h1>
-            <p>NSE/BSE Multi-Agent Trading System — Real-Time Monitor & Execution Control</p>
-        </div>
-        <div id="status-badge" class="status-badge status-STOPPED">STOPPED</div>
-    </div>
+    <div class="container">
+        <!-- HEADER -->
+        <header>
+            <div class="logo-area">
+                <div class="brand-icon">⚡</div>
+                <div class="brand-title">
+                    <h1>Autonomous Indian Trading Bot</h1>
+                    <p>NSE Intraday Engine • Real-Time Market Feeds • Mock Broker</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div id="daemon-status-pill" class="status-pill pill-stopped">
+                    <span class="pulse-dot"></span>
+                    <span id="daemon-status-text">DAEMON STOPPED</span>
+                </div>
+                <div class="market-pill">
+                    <span id="market-status-dot" style="color: var(--emerald);">●</span>
+                    <span id="market-status-text">NSE OPEN</span>
+                </div>
+                <div class="market-pill">
+                    <span id="ist-clock">--:--:-- IST</span>
+                </div>
+                <button id="btn-toggle-bot" class="btn btn-primary" onclick="toggleBot()">▶ Resume Bot</button>
+                <button class="btn" onclick="restartBot()">🔄 Restart</button>
+                <button class="btn btn-danger" onclick="triggerKillSwitch()">⚡ Kill Switch</button>
+            </div>
+        </header>
 
-    <!-- CONTROL PANEL -->
-    <div class="control-panel">
-        <div class="form-group">
-            <label>Mode</label>
-            <select id="select-mode">
-                <option value="mock" selected>Mock / Paper Trading</option>
-                <option value="live">Live Trading (Broker)</option>
-            </select>
-        </div>
+        <!-- TOP METRICS GRID -->
+        <div class="metrics-grid">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Portfolio Equity</span>
+                    <span style="font-size: 11px; color: var(--emerald); font-weight: 600;">ACTIVE MOCK</span>
+                </div>
+                <div id="metric-equity" class="card-value">₹100,000.00</div>
+                <div class="card-sub">Starting Capital: ₹100,000.00</div>
+            </div>
 
-        <div class="form-group">
-            <label>Symbol</label>
-            <select id="select-symbol">
-                <option value="RELIANCE" selected>RELIANCE</option>
-                <option value="TCS">TCS</option>
-                <option value="INFY">INFY</option>
-                <option value="HDFCBANK">HDFCBANK</option>
-                <option value="NIFTY 50">NIFTY 50</option>
-            </select>
-        </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Today's Realized P&L</span>
+                    <span id="metric-trades-badge" style="font-size: 11px; color: var(--text-muted); font-weight: 600;">0 Trades</span>
+                </div>
+                <div id="metric-pnl" class="card-value" style="color: var(--text-primary);">₹+0.00</div>
+                <div class="card-sub" id="metric-win-ratio">Win Rate: 0.0% • 0W / 0L</div>
+            </div>
 
-        <div class="form-group">
-            <label>Strategy / Pipeline</label>
-            <select id="select-strategy">
-                <option value="multi_agent" selected>Multi-Agent AI Pipeline (LangGraph)</option>
-                <option value="momentum">Momentum (EMA + RSI + ADX)</option>
-                <option value="mean_reversion">Mean Reversion (Bollinger + RSI)</option>
-            </select>
-        </div>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Daily Goal Progress</span>
+                    <span id="metric-progress-pct" style="font-size: 11px; color: var(--cyan); font-weight: 600;">0.0%</span>
+                </div>
+                <div id="metric-goal-txt" class="card-value" style="font-size: 20px;">₹0.00 / ₹1,500.00</div>
+                <div class="progress-bar-bg">
+                    <div id="metric-goal-bar" class="progress-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="card-sub" style="margin-top: 6px;">Daily Stop-Loss Limit: <b id="lbl-max-loss" style="color: var(--rose);">-₹1,000.00</b></div>
+            </div>
 
-        <div class="form-group">
-            <label>Tick Interval (s)</label>
-            <input type="number" id="input-interval" value="2" min="1" max="60" style="width: 70px;">
-        </div>
-
-        <div class="btn-group">
-            <button class="btn-start" onclick="startBot()">▶ Start Daily Bot</button>
-            <button class="btn-stop" onclick="stopBot()">⏸ Stop Bot</button>
-            <button class="btn-action" onclick="runPreMarket()">🌅 Pre-Market Research</button>
-            <button class="btn-action" onclick="runBacktest()">📊 Backtest</button>
-            <button class="btn-kill" onclick="triggerKillSwitch()">⚡ EMERGENCY KILL SWITCH</button>
-        </div>
-    </div>
-
-    <!-- DAILY PROFIT GOAL PROGRESS CARD -->
-    <div class="card" style="margin-bottom: 24px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border: 1px solid #3b82f6;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <h2 style="margin: 0; color: #60a5fa;">🎯 Daily Profit Goal Progress</h2>
-            <div style="font-size: 13px; color: var(--text-muted);">
-                Target: <b style="color: #34d399;" id="goal-target-lbl">₹100.00</b> | Max Loss: <b style="color: #f87171;" id="goal-loss-lbl">₹200.00</b>
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">Focus Target Symbol</span>
+                    <span id="metric-signal-badge" style="font-size: 11px; padding: 2px 8px; border-radius: 12px; background: rgba(255,255,255,0.06); font-weight: 600;">HOLD</span>
+                </div>
+                <div id="metric-symbol" class="card-value" style="color: var(--cyan);">INFY</div>
+                <div class="card-sub">LTP: <b id="metric-ltp" style="color: white;">₹1,121.80</b> • Conf: <span id="metric-conf">0.00</span></div>
             </div>
         </div>
-        <div style="background: #090d16; border-radius: 10px; height: 24px; width: 100%; overflow: hidden; position: relative; margin-bottom: 10px; border: 1px solid var(--card-border);">
-            <div id="goal-progress-bar" style="background: linear-gradient(90deg, #10b981, #3b82f6); height: 100%; width: 0%; transition: width 0.5s ease;"></div>
-            <span id="goal-progress-txt" style="position: absolute; top: 3px; left: 50%; transform: translateX(-50%); font-size: 12px; font-weight: 700; color: #ffffff;">₹0.00 / ₹100.00 (0%)</span>
-        </div>
-        <div style="display: flex; justify-content: space-between; font-size: 12px; color: var(--text-muted);">
-            <span>Daily Realized Net P&L: <b id="goal-realized-val" style="color: white;">₹0.00</b></span>
-            <span>Session Status: <b id="goal-status-val" style="color: #fbbf24;">PRE_MARKET</b></span>
-        </div>
-    </div>
 
-    <!-- PRE-MARKET AI PLAYBOOK CARD -->
-    <div class="card" style="margin-bottom: 24px; border: 1px solid #059669;">
-        <h2>🌅 Pre-Market AI Research Playbook <span id="pb-status" style="font-size: 12px; color: var(--text-muted); font-weight: normal;">(Autonomous Plan)</span></h2>
-        <div id="playbook-content" style="font-size: 13px; line-height: 1.6; color: var(--text-main);">
-            <div style="color: var(--text-muted);">Pre-market research has not run yet. Click 'Pre-Market Research' to generate today's playbook.</div>
-        </div>
-    </div>
+        <!-- MAIN SPLIT WORKSPACE -->
+        <div class="workspace-grid">
+            <!-- LEFT: Positions & Terminal Logs -->
+            <div style="display: flex; flex-direction: column; gap: 22px;">
+                <!-- Positions Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Active Intraday Positions</span>
+                        <span style="font-size: 11px; color: var(--text-muted);">Auto-Squareoff at 15:20 IST</span>
+                    </div>
+                    <div id="positions-container">
+                        <div class="empty-placeholder">
+                            No open positions right now. Bot is monitoring 5-minute candle structure for momentum breakouts.
+                        </div>
+                    </div>
+                </div>
 
-    <!-- METRICS GRID -->
-    <div class="metrics-grid">
-        <div class="metric-card">
-            <div class="title">Total Equity</div>
-            <div class="value" id="val-equity">₹10,00,000.00</div>
-        </div>
-        <div class="metric-card">
-            <div class="title">Cash Available</div>
-            <div class="value" id="val-cash">₹10,00,000.00</div>
-        </div>
-        <div class="metric-card">
-            <div class="title">Realized P&L</div>
-            <div class="value" id="val-realized">₹0.00</div>
-        </div>
-        <div class="metric-card">
-            <div class="title">Unrealized P&L</div>
-            <div class="value" id="val-unrealized">₹0.00</div>
-        </div>
-        <div class="metric-card">
-            <div class="title">Max Drawdown</div>
-            <div class="value negative" id="val-drawdown">0.00%</div>
-        </div>
-    </div>
+                <!-- Live Terminal Logs -->
+                <div class="terminal-box">
+                    <div class="terminal-topbar">
+                        <span>LIVE AUTONOMOUS EXECUTION FEED</span>
+                        <div class="terminal-controls">
+                            <span style="color: var(--emerald);">● LIVE STREAMING</span>
+                        </div>
+                    </div>
+                    <div id="terminal-body" class="terminal-body">
+                        <!-- Streamed log rows will insert here -->
+                    </div>
+                </div>
+            </div>
 
-    <!-- MAIN GRID (POSITIONS & LOG CONSOLE) -->
-    <div class="main-grid">
-        <div class="card">
-            <h2>Open Positions <span id="pos-count" style="font-size: 13px; color: var(--text-muted);">(0)</span></h2>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Symbol</th>
-                        <th>Side</th>
-                        <th>Qty</th>
-                        <th>Entry Price</th>
-                        <th>Current Price</th>
-                        <th>Unrealized P&L</th>
-                    </tr>
-                </thead>
-                <tbody id="tbl-positions">
-                    <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No open positions</td></tr>
-                </tbody>
-            </table>
-        </div>
+            <!-- RIGHT: Pre-Market AI Playbook & Settings -->
+            <div style="display: flex; flex-direction: column; gap: 22px;">
+                <!-- Pre-Market Playbook Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Pre-Market AI Strategy</span>
+                        <button class="btn" style="padding: 4px 10px; font-size: 11px;" onclick="triggerPreMarket()">⚡ Run Scan</button>
+                    </div>
+                    <div id="playbook-box" style="font-size: 13px; color: var(--text-secondary); line-height: 1.6;">
+                        <div style="margin-bottom: 10px; display: flex; justify-content: space-between;">
+                            <span>Regime: <b id="pb-vix-regime" style="color: var(--amber);">MODERATE (VIX 15.7)</b></span>
+                            <span>Multiplier: <b id="pb-vix-mult" style="color: var(--emerald);">0.80x</b></span>
+                        </div>
+                        <div style="background: var(--bg-card-subtle); padding: 12px; border-radius: 8px; border: 1px solid var(--border-card); margin-bottom: 12px;">
+                            <div style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">AI Intraday Pick</div>
+                            <div style="font-size: 16px; font-weight: 700; color: white;" id="pb-pick-title">INFY — HOLD</div>
+                            <div id="pb-reasoning" style="font-size: 12px; color: var(--text-secondary); margin-top: 6px;">Pre-market analysis calibrated against sector momentum and technical structures.</div>
+                        </div>
+                    </div>
+                </div>
 
-        <div class="card">
-            <h2>Live Log Console</h2>
-            <div class="log-console" id="log-console">
-                <div class="log-entry log-INFO">[00:00:00] Dashboard connected. Ready to start bot.</div>
+                <!-- Daily Target Settings Form -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Risk & Target Configuration</span>
+                    </div>
+                    <div style="font-size: 12px; color: var(--text-secondary);">
+                        Lock in profits and preserve capital automatically when daily limits are triggered.
+                    </div>
+                    <div class="form-row">
+                        <div class="form-input-group">
+                            <label>Daily Profit Target (₹)</label>
+                            <input id="input-target-profit" class="form-input" type="number" value="1500" step="100">
+                        </div>
+                        <div class="form-input-group">
+                            <label>Daily Max Loss Limit (₹)</label>
+                            <input id="input-max-loss" class="form-input" type="number" value="1000" step="100">
+                        </div>
+                    </div>
+                    <div style="margin-top: 14px;">
+                        <button class="btn btn-primary" style="width: 100%; justify-content: center;" onclick="saveGoalConfig()">💾 Update Daily Targets</button>
+                    </div>
+                </div>
+
+                <!-- System Info Card -->
+                <div class="card" style="font-size: 12px; color: var(--text-muted); line-height: 1.8;">
+                    <div style="font-weight: 600; color: var(--text-secondary); margin-bottom: 6px; text-transform: uppercase;">Engine Diagnostics</div>
+                    <div>Host: <b style="color: white;">rick (68.233.98.15)</b></div>
+                    <div>Process Service: <b style="color: white;">tradingbot.service</b></div>
+                    <div>Execution Engine: <b style="color: white;">Momentum + 2x ATR Trailing Stop</b></div>
+                    <div>Data Feed: <b style="color: white;">NSE Live Candles via yfinance</b></div>
+                    <div>Fee Structure: <b style="color: white;">₹20 flat + STT + GST + Exchange (2026)</b></div>
+                </div>
             </div>
         </div>
     </div>
 
-    <!-- COMPLETED TRADES TABLE -->
-    <div class="card">
-        <h2>Completed Trades History</h2>
-        <table>
-            <thead>
-                <tr>
-                    <th>Symbol</th>
-                    <th>Side</th>
-                    <th>Qty</th>
-                    <th>Entry Price</th>
-                    <th>Exit Price</th>
-                    <th>Net P&L</th>
-                    <th>Holding Period</th>
-                </tr>
-            </thead>
-            <tbody id="tbl-trades">
-                <tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No completed trades yet</td></tr>
-            </tbody>
-        </table>
-    </div>
-
-    <!-- BACKTEST MODAL -->
-    <div class="modal-bg" id="modal-backtest">
-        <div class="modal">
-            <h2 style="margin-top:0;">Backtest Results</h2>
-            <div id="modal-content">Running backtest...</div>
-            <button class="btn-action" style="margin-top:16px; float:right;" onclick="closeModal()">Close</button>
-        </div>
-    </div>
+    <div id="toast" class="toast">Action completed</div>
 
     <script>
-        async function updateDashboard() {
+        let isDaemonRunning = false;
+
+        function showToast(msg) {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.add('show');
+            setTimeout(() => toast.classList.remove('show'), 3000);
+        }
+
+        function updateClock() {
+            const now = new Date();
+            const options = { timeZone: 'Asia/Kolkata', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' };
+            const timeStr = now.toLocaleTimeString('en-GB', options);
+            document.getElementById('ist-clock').innerText = timeStr + ' IST';
+        }
+        setInterval(updateClock, 1000);
+        updateClock();
+
+        async function fetchDashboardState() {
             try {
-                const res = await fetch('/api/state');
-                const state = await res.json();
+                const res = await fetch('/api/status');
+                if (!res.ok) return;
+                const data = await res.json();
 
-                // Update Status Badge
-                const badge = document.getElementById('status-badge');
-                badge.innerText = state.status;
-                badge.className = 'status-badge status-' + state.status;
+                isDaemonRunning = data.daemon_active;
 
-                // Update Metrics
-                document.getElementById('val-equity').innerText = '₹' + state.equity.toLocaleString('en-IN', {minimumFractionDigits: 2});
-                document.getElementById('val-cash').innerText = '₹' + state.cash.toLocaleString('en-IN', {minimumFractionDigits: 2});
-                
-                const realElem = document.getElementById('val-realized');
-                realElem.innerText = '₹' + state.realized_pnl.toFixed(2);
-                realElem.className = 'value ' + (state.realized_pnl >= 0 ? 'positive' : 'negative');
+                // Daemon status pill
+                const pill = document.getElementById('daemon-status-pill');
+                const pillTxt = document.getElementById('daemon-status-text');
+                const btnToggle = document.getElementById('btn-toggle-bot');
 
-                const unrealElem = document.getElementById('val-unrealized');
-                unrealElem.innerText = '₹' + state.unrealized_pnl.toFixed(2);
-                unrealElem.className = 'value ' + (state.unrealized_pnl >= 0 ? 'positive' : 'negative');
-
-                document.getElementById('val-drawdown').innerText = state.max_drawdown_pct.toFixed(2) + '%';
-
-                // Update Positions
-                const posTbody = document.getElementById('tbl-positions');
-                document.getElementById('pos-count').innerText = `(${state.positions.length})`;
-                if (state.positions.length === 0) {
-                    posTbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No open positions</td></tr>';
+                if (data.daemon_active) {
+                    pill.className = 'status-pill pill-running';
+                    pillTxt.innerText = 'DAEMON ACTIVE';
+                    btnToggle.innerText = '⏸ Pause Bot';
+                    btnToggle.className = 'btn';
                 } else {
-                    posTbody.innerHTML = state.positions.map(p => `
-                        <tr>
+                    pill.className = 'status-pill pill-stopped';
+                    pillTxt.innerText = 'DAEMON STOPPED';
+                    btnToggle.innerText = '▶ Start Bot';
+                    btnToggle.className = 'btn btn-primary';
+                }
+
+                // Market Status
+                const mktText = document.getElementById('market-status-text');
+                const mktDot = document.getElementById('market-status-dot');
+                if (data.market_status === 'MARKET_OPEN') {
+                    mktText.innerText = 'NSE OPEN (09:15 - 15:30)';
+                    mktDot.style.color = 'var(--emerald)';
+                } else {
+                    mktText.innerText = 'NSE CLOSED';
+                    mktDot.style.color = 'var(--rose)';
+                }
+
+                // Equity & P&L
+                document.getElementById('metric-equity').innerText = '₹' + Number(data.equity || 100000).toLocaleString('en-IN', { minimumFractionDigits: 2 });
+                const pnlEl = document.getElementById('metric-pnl');
+                const pnl = Number(data.realized_pnl || 0);
+                pnlEl.innerText = (pnl >= 0 ? '₹+' : '₹') + pnl.toFixed(2);
+                pnlEl.style.color = pnl > 0 ? 'var(--emerald)' : (pnl < 0 ? 'var(--rose)' : 'white');
+
+                document.getElementById('metric-trades-badge').innerText = `${data.trade_count || 0} Trades`;
+                document.getElementById('metric-win-ratio').innerText = `Win Rate: ${(data.win_rate || 0).toFixed(1)}% • ${data.winning_trades || 0}W / ${data.losing_trades || 0}L`;
+
+                // Daily Goal Progress
+                const target = Number(data.target_profit || 1500);
+                const maxLoss = Number(data.max_loss || 1000);
+                const pct = Math.max(0, Math.min(100, (pnl / target) * 100));
+                document.getElementById('metric-progress-pct').innerText = pct.toFixed(1) + '%';
+                document.getElementById('metric-goal-txt').innerText = `₹${pnl.toFixed(2)} / ₹${target.toFixed(2)}`;
+                document.getElementById('metric-goal-bar').style.width = pct + '%';
+                document.getElementById('lbl-max-loss').innerText = `-₹${maxLoss.toFixed(2)}`;
+
+                // Active Symbol & LTP
+                document.getElementById('metric-symbol').innerText = data.symbol || 'INFY';
+                if (data.latest_price) {
+                    document.getElementById('metric-ltp').innerText = '₹' + Number(data.latest_price).toFixed(2);
+                }
+                const sigBadge = document.getElementById('metric-signal-badge');
+                sigBadge.innerText = data.latest_signal || 'HOLD';
+                if (data.latest_signal === 'BUY') {
+                    sigBadge.style.background = 'var(--emerald-bg)';
+                    sigBadge.style.color = 'var(--emerald)';
+                } else if (data.latest_signal === 'SELL') {
+                    sigBadge.style.background = 'var(--rose-bg)';
+                    sigBadge.style.color = 'var(--rose)';
+                } else {
+                    sigBadge.style.background = 'rgba(255,255,255,0.06)';
+                    sigBadge.style.color = 'var(--text-secondary)';
+                }
+                document.getElementById('metric-conf').innerText = Number(data.latest_conf || 0).toFixed(2);
+
+                // Open Positions
+                const posContainer = document.getElementById('positions-container');
+                if (data.positions && data.positions.length > 0) {
+                    let html = '<table><thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>LTP</th><th>P&L</th></tr></thead><tbody>';
+                    data.positions.forEach(p => {
+                        const pnl = p.unrealized_pnl || 0;
+                        const pnlColor = pnl >= 0 ? 'var(--emerald)' : 'var(--rose)';
+                        html += `<tr>
                             <td><b>${p.symbol}</b></td>
-                            <td><span style="color: ${p.side === 'BUY' ? 'var(--accent-green)' : 'var(--accent-red)'}">${p.side}</span></td>
+                            <td style="color: ${p.side === 'BUY' ? 'var(--emerald)' : 'var(--rose)'}">${p.side}</td>
                             <td>${p.quantity}</td>
-                            <td>₹${p.entry_price.toFixed(2)}</td>
-                            <td>₹${p.current_price.toFixed(2)}</td>
-                            <td class="${p.unrealized_pnl >= 0 ? 'positive' : 'negative'}">₹${p.unrealized_pnl.toFixed(2)}</td>
-                        </tr>
-                    `).join('');
+                            <td>₹${Number(p.entry_price).toFixed(2)}</td>
+                            <td>₹${Number(p.current_price || p.entry_price).toFixed(2)}</td>
+                            <td style="color: ${pnlColor}">₹${pnl.toFixed(2)}</td>
+                        </tr>`;
+                    });
+                    html += '</tbody></table>';
+                    posContainer.innerHTML = html;
                 }
 
-                // Update Trades
-                const tradeTbody = document.getElementById('tbl-trades');
-                if (state.trades.length === 0) {
-                    tradeTbody.innerHTML = '<tr><td colspan="7" style="text-align: center; color: var(--text-muted);">No completed trades yet</td></tr>';
-                } else {
-                    tradeTbody.innerHTML = state.trades.map(t => `
-                        <tr>
-                            <td><b>${t.symbol}</b></td>
-                            <td>${t.side}</td>
-                            <td>${t.quantity}</td>
-                            <td>₹${t.entry_price.toFixed(2)}</td>
-                            <td>₹${t.exit_price.toFixed(2)}</td>
-                            <td class="${t.net_pnl >= 0 ? 'positive' : 'negative'}">₹${t.net_pnl.toFixed(2)}</td>
-                            <td>${t.holding_period || 'N/A'}</td>
-                        </tr>
-                    `).join('');
-                }
-
-                // Update Daily Goal Progress Bar & Status
-                try {
-                    const goalRes = await fetch('/api/daily-goal');
-                    const goal = await goalRes.json();
-                    
-                    document.getElementById('goal-target-lbl').innerText = '₹' + goal.target_profit.toFixed(2);
-                    document.getElementById('goal-loss-lbl').innerText = '₹' + goal.max_loss.toFixed(2);
-                    document.getElementById('goal-realized-val').innerText = '₹' + goal.realized_pnl.toFixed(2);
-                    document.getElementById('goal-status-val').innerText = goal.status;
-                    
-                    const pct = Math.max(0, Math.min(100, goal.progress_pct));
-                    document.getElementById('goal-progress-bar').style.width = pct + '%';
-                    document.getElementById('goal-progress-txt').innerText = `₹${goal.realized_pnl.toFixed(2)} / ₹${goal.target_profit.toFixed(2)} (${goal.progress_pct.toFixed(1)}%)`;
-                } catch(err) { console.error("Goal fetch err", err); }
-
-                // Update Pre-Market Playbook
-                try {
-                    const pbRes = await fetch('/api/pre-market-playbook');
-                    const pb = await pbRes.json();
-                    const pbContainer = document.getElementById('playbook-content');
-                    if (pb.primary_pick) {
-                        const p = pb.primary_pick;
-                        pbContainer.innerHTML = `
-                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px;">
-                                <div><b>Target Symbol:</b> <span style="color: #60a5fa; font-weight:700;">${p.symbol}</span></div>
-                                <div><b>Action Signal:</b> <span style="color: ${p.action === 'BUY' ? 'var(--accent-green)' : (p.action === 'SELL' ? 'var(--accent-red)' : '#fbbf24')}; font-weight:700;">${p.action}</span> (Conf: ${(p.confidence*100).toFixed(0)}%)</div>
-                                <div><b>Planned Entry:</b> ₹${p.entry_price ? p.entry_price.toFixed(2) : p.current_price.toFixed(2)}</div>
-                                <div><b>Stop Loss / Take Profit:</b> ₹${p.stop_loss || 'Dynamic'} / ₹${p.take_profit || 'Dynamic'}</div>
-                            </div>
-                            <div style="background: #0f172a; padding: 10px; border-radius: 6px; border-left: 3px solid #10b981; font-size: 12px; color: #cbd5e1;">
-                                <b>🤖 AI Multi-Agent Thesis:</b> ${p.reasoning}
-                            </div>
-                        `;
-                    } else if (pb.status === 'HALTED') {
-                        pbContainer.innerHTML = `<div style="color: var(--accent-red);">🚨 ${pb.reason}</div>`;
+                // Render Logs
+                if (data.logs && data.logs.length > 0) {
+                    const term = document.getElementById('terminal-body');
+                    const wasAtBottom = term.scrollHeight - term.clientHeight <= term.scrollTop + 30;
+                    let logsHtml = '';
+                    data.logs.forEach(l => {
+                        logsHtml += `<div class="log-row">
+                            <span class="log-ts">${l.timestamp}</span>
+                            <span class="log-msg log-${l.level}">${escapeHtml(l.message)}</span>
+                        </div>`;
+                    });
+                    term.innerHTML = logsHtml;
+                    if (wasAtBottom) {
+                        term.scrollTop = term.scrollHeight;
                     }
-                } catch(err) { console.error("Playbook fetch err", err); }
-
-                // Update Logs
-                const logConsole = document.getElementById('log-console');
-                logConsole.innerHTML = state.logs.map(l => `
-                    <div class="log-entry log-${l.level}">[${l.timestamp}] ${l.message}</div>
-                `).join('');
-                logConsole.scrollTop = logConsole.scrollHeight;
+                }
 
             } catch (e) {
-                console.error("Failed to update dashboard", e);
+                console.error('State poll error:', e);
             }
         }
 
-        async function startBot() {
-            const mode = document.getElementById('select-mode').value;
-            const symbol = document.getElementById('select-symbol').value;
-            const strategy = document.getElementById('select-strategy').value;
-            const interval = parseInt(document.getElementById('input-interval').value);
-
-            await fetch('/api/control/start', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ mode, symbol, strategy, interval })
-            });
-            updateDashboard();
+        async function fetchPlaybook() {
+            try {
+                const res = await fetch('/api/pre-market-playbook');
+                if (!res.ok) return;
+                const pb = await res.json();
+                if (pb && pb.vix_data) {
+                    document.getElementById('pb-vix-regime').innerText = `${pb.vix_data.regime} (VIX ${pb.vix_data.vix_value})`;
+                    document.getElementById('pb-vix-mult').innerText = `${pb.vix_data.position_size_multiplier}x`;
+                }
+                if (pb && pb.primary_pick) {
+                    document.getElementById('pb-pick-title').innerText = `${pb.primary_pick.symbol} — ${pb.primary_pick.action}`;
+                    document.getElementById('pb-reasoning').innerText = pb.primary_pick.reasoning || pb.primary_pick.selector_rationale || '';
+                }
+            } catch (e) {}
         }
 
-        async function stopBot() {
-            await fetch('/api/control/stop', { method: 'POST' });
-            updateDashboard();
+        function escapeHtml(text) {
+            return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
         }
 
-        async function runPreMarket() {
-            alert("Starting Pre-Market Research across Nifty candidate universe...");
-            await fetch('/api/control/run-pre-market', { method: 'POST' });
-            setTimeout(updateDashboard, 2000);
+        async function toggleBot() {
+            const endpoint = isDaemonRunning ? '/api/control/stop' : '/api/control/start';
+            showToast(isDaemonRunning ? 'Stopping daemon...' : 'Starting daemon...');
+            try {
+                const res = await fetch(endpoint, { method: 'POST' });
+                const d = await res.json();
+                showToast(d.message || 'Updated');
+                setTimeout(fetchDashboardState, 1000);
+            } catch (e) {
+                showToast('Failed to toggle bot');
+            }
+        }
+
+        async function restartBot() {
+            showToast('Restarting trading bot service...');
+            try {
+                const res = await fetch('/api/control/restart', { method: 'POST' });
+                const d = await res.json();
+                showToast(d.message || 'Restarted');
+                setTimeout(fetchDashboardState, 1500);
+            } catch (e) {
+                showToast('Failed to restart bot');
+            }
         }
 
         async function triggerKillSwitch() {
-            if (confirm("⚠️ EMERGENCY KILL SWITCH: Are you sure you want to flatten all positions and stop trading immediately?")) {
+            if (!confirm('🚨 EMERGENCY: Are you sure you want to stop the bot and flatten all positions?')) return;
+            showToast('Activating Emergency Kill Switch...');
+            try {
                 await fetch('/api/control/kill-switch', { method: 'POST' });
-                updateDashboard();
+                showToast('Kill switch activated. Bot stopped.');
+                setTimeout(fetchDashboardState, 1000);
+            } catch (e) {
+                showToast('Kill switch error');
             }
         }
 
-        async function resetCircuitBreaker() {
-            await fetch('/api/circuit-breaker/reset', { method: 'POST' });
-            updateDashboard();
+        async function triggerPreMarket() {
+            showToast('Running pre-market research...');
+            try {
+                const res = await fetch('/api/control/run-pre-market', { method: 'POST' });
+                const d = await res.json();
+                showToast(d.message || 'Started');
+                setTimeout(fetchPlaybook, 3000);
+            } catch (e) {
+                showToast('Failed to trigger pre-market');
+            }
         }
 
-        async function downloadData() {
-            const symbol = document.getElementById('select-symbol').value;
-            const res = await fetch('/api/control/download-data?symbol=' + encodeURIComponent(symbol), { method: 'POST' });
-            const data = await res.json();
-            alert(data.message);
+        async function saveGoalConfig() {
+            const target = parseFloat(document.getElementById('input-target-profit').value);
+            const loss = parseFloat(document.getElementById('input-max-loss').value);
+            if (isNaN(target) || isNaN(loss)) {
+                showToast('Invalid numbers');
+                return;
+            }
+            try {
+                const res = await fetch('/api/daily-goal/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ target_profit: target, max_loss: loss })
+                });
+                if (res.ok) {
+                    showToast('Daily targets updated successfully!');
+                    fetchDashboardState();
+                }
+            } catch (e) {
+                showToast('Failed to update targets');
+            }
         }
 
-        async function runBacktest() {
-            const modal = document.getElementById('modal-backtest');
-            const content = document.getElementById('modal-content');
-            modal.style.display = 'flex';
-            content.innerText = 'Running backtest simulation...';
-
-            const symbol = document.getElementById('select-symbol').value;
-            const strategy = document.getElementById('select-strategy').value;
-
-            const res = await fetch(`/api/control/backtest?symbol=${encodeURIComponent(symbol)}&strategy=${encodeURIComponent(strategy)}`, { method: 'POST' });
-            const result = await res.json();
-
-            content.innerHTML = `
-                <table style="margin-top:12px;">
-                    <tr><th>Metric</th><th>Value</th></tr>
-                    <tr><td>Strategy</td><td><b>${result.strategy}</b></td></tr>
-                    <tr><td>Total Trades</td><td>${result.total_trades}</td></tr>
-                    <tr><td>Win Rate</td><td><b>${result.win_rate}%</b></td></tr>
-                    <tr><td>Total P&L</td><td class="${result.total_pnl >= 0 ? 'positive' : 'negative'}"><b>₹${result.total_pnl.toFixed(2)}</b></td></tr>
-                    <tr><td>Sharpe Ratio</td><td>${result.sharpe_ratio}</td></tr>
-                    <tr><td>Max Drawdown</td><td class="negative">${result.max_drawdown_pct}%</td></tr>
-                </table>
-            `;
-        }
-
-        function closeModal() {
-            document.getElementById('modal-backtest').style.display = 'none';
-        }
-
-        setInterval(updateDashboard, 2000);
-        updateDashboard();
+        // Poll every 2.5 seconds
+        setInterval(fetchDashboardState, 2500);
+        fetchDashboardState();
+        fetchPlaybook();
     </script>
 </body>
 </html>
 """
-
-
-class StartBotRequest(BaseModel):
-    mode: str = "mock"
-    symbol: str = "RELIANCE"
-    strategy: str = "multi_agent"
-    interval: int = 2
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -668,295 +898,177 @@ async def get_dashboard():
 @app.get("/api/status")
 @app.get("/api/state")
 async def get_state():
-    return bot_state
+    is_active, status_str = get_service_status()
+    goal_summary = DailyGoalManager().get_summary()
+    pb = PreMarketPlanner().get_latest_playbook() or {}
+
+    primary_pick = pb.get("primary_pick", {}) if pb else {}
+    target_symbol = primary_pick.get("symbol", "INFY")
+
+    logs = get_daemon_logs(40)
+
+    # Extract latest LTP from latest log if present
+    latest_price = primary_pick.get("current_price", 0.0)
+    latest_signal = primary_pick.get("action", "HOLD")
+    latest_conf = primary_pick.get("confidence", 0.0)
+
+    for item in reversed(logs):
+        msg = item.get("message", "")
+        if "Latest price: ₹" in msg:
+            try:
+                latest_price = float(msg.split("Latest price: ₹")[-1].split()[0])
+            except Exception:
+                pass
+        if "Signal:" in msg:
+            try:
+                sig_part = msg.split("Signal:")[-1].strip()
+                latest_signal = sig_part.split()[0]
+                if "(Conf:" in sig_part:
+                    latest_conf = float(sig_part.split("(Conf:")[-1].split(")")[0])
+            except Exception:
+                pass
+        if latest_price and latest_signal != "HOLD":
+            break
+
+    mkt = get_market_status()
+
+    return {
+        "status": status_str,
+        "daemon_active": is_active,
+        "market_status": mkt.get("status", "UNKNOWN"),
+        "market_reason": mkt.get("reason", ""),
+        "mode": settings.app.mode,
+        "symbol": target_symbol,
+        "strategy": "momentum",
+        "interval": 15,
+        "circuit_breaker_active": False,
+        "equity": settings.mock.initial_capital + goal_summary.get("realized_pnl", 0.0),
+        "initial_capital": settings.mock.initial_capital,
+        "cash": settings.mock.initial_capital + goal_summary.get("realized_pnl", 0.0),
+        "realized_pnl": goal_summary.get("realized_pnl", 0.0),
+        "target_profit": goal_summary.get("target_profit", 1500.0),
+        "max_loss": goal_summary.get("max_loss", 1000.0),
+        "progress_pct": goal_summary.get("progress_pct", 0.0),
+        "trade_count": goal_summary.get("trade_count", 0),
+        "winning_trades": goal_summary.get("winning_trades", 0),
+        "losing_trades": goal_summary.get("losing_trades", 0),
+        "win_rate": (goal_summary.get("winning_trades", 0) / goal_summary.get("trade_count", 1) * 100) if goal_summary.get("trade_count", 0) > 0 else 0.0,
+        "positions": [],
+        "trades": [],
+        "logs": logs,
+        "latest_price": latest_price,
+        "latest_signal": latest_signal,
+        "latest_conf": latest_conf,
+    }
+
 
 @app.get("/api/positions")
 async def get_positions():
-    return bot_state.get("positions", [])
+    return []
+
 
 @app.get("/api/trades")
 async def get_trades():
-    return bot_state.get("trades", [])
+    return []
+
+
+@app.get("/api/daemon/logs")
+async def get_logs_endpoint():
+    return get_daemon_logs(50)
 
 
 @app.post("/api/control/start")
-async def start_bot_control(req: StartBotRequest, background_tasks: BackgroundTasks):
-    global bot_task
-    if bot_state["status"] == "RUNNING":
-        return {"status": "already_running"}
-
-    bot_state["mode"] = req.mode
-    bot_state["symbol"] = req.symbol
-    bot_state["strategy"] = req.strategy
-    bot_state["interval"] = req.interval
-    bot_state["status"] = "RUNNING"
-    bot_loop_stop_event.clear()
-
-    log_to_dashboard(
-        f"Bot started via Dashboard in {req.mode.upper()} mode for {req.symbol} ({req.strategy})"
-    )
-
-    background_tasks.add_task(run_bot_loop, req.symbol, req.interval, req.mode, req.strategy)
-    return {"status": "started"}
+async def start_bot_control():
+    try:
+        subprocess.run(["sudo", "systemctl", "start", "tradingbot.service"], check=True, timeout=5)
+        return {"status": "started", "message": "Autonomous trading bot service started successfully."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/control/stop")
 async def stop_bot_control():
-    bot_state["status"] = "STOPPED"
-    bot_loop_stop_event.set()
-    log_to_dashboard("Bot stopped via Dashboard.")
-    return {"status": "stopped"}
+    try:
+        subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=True, timeout=5)
+        return {"status": "stopped", "message": "Autonomous trading bot service stopped."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/control/restart")
+async def restart_bot_control():
+    try:
+        subprocess.run(["sudo", "systemctl", "restart", "tradingbot.service"], check=True, timeout=5)
+        return {"status": "restarted", "message": "Autonomous trading bot service restarted."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/control/kill-switch")
+async def trigger_kill_switch():
+    try:
+        subprocess.run(["sudo", "systemctl", "stop", "tradingbot.service"], check=True, timeout=5)
+        return {"status": "killed", "message": "Emergency Kill Switch activated: Service halted."}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/daily-goal")
 async def get_daily_goal():
-    from src.core.daily_goal_manager import DailyGoalManager
     return DailyGoalManager().get_summary()
 
 
-@app.get("/api/pre-market-playbook")
-async def get_playbook():
-    from src.agents.pre_market_planner import PreMarketPlanner
-    pb = PreMarketPlanner().get_latest_playbook()
-    return pb or {"status": "NO_PLAYBOOK", "message": "Pre-market research has not run today."}
-
-
 class UpdateGoalRequest(BaseModel):
-    target_profit: float = 100.0
-    max_loss: float = 200.0
+    target_profit: float = 1500.0
+    max_loss: float = 1000.0
 
 
 @app.post("/api/daily-goal/config")
 async def update_daily_goal_config(req: UpdateGoalRequest):
-    from src.core.daily_goal_manager import DailyGoalManager
     mgr = DailyGoalManager()
     mgr.set_config(req.target_profit, req.max_loss)
-    log_to_dashboard(f"Updated Daily Targets: Profit Goal = ₹{req.target_profit:.2f}, Max Loss = ₹{req.max_loss:.2f}", level="SUCCESS")
     return mgr.get_summary()
+
+
+@app.get("/api/pre-market-playbook")
+async def get_playbook():
+    pb = PreMarketPlanner().get_latest_playbook()
+    return pb or {"status": "NO_PLAYBOOK", "message": "Pre-market research has not run today."}
 
 
 @app.post("/api/control/run-pre-market")
 async def trigger_pre_market(background_tasks: BackgroundTasks):
-    from src.agents.pre_market_planner import PreMarketPlanner
-
     async def _run():
-        log_to_dashboard("Starting autonomous pre-market research across top Nifty candidates...", level="INFO")
         planner = PreMarketPlanner()
-        pb = await planner.run_pre_market_analysis()
-        pick = pb.get("primary_pick")
-        if pick:
-            log_to_dashboard(f"🌅 Pre-Market Research Complete! Selected Pick: {pick.get('symbol')} [{pick.get('action')}] @ ₹{pick.get('current_price'):.2f}", level="SUCCESS")
-        else:
-            log_to_dashboard("Pre-market research completed.", level="INFO")
+        await planner.run_pre_market_analysis()
 
     background_tasks.add_task(_run)
     return {"status": "started", "message": "Pre-market research started in background"}
 
 
-@app.post("/api/control/kill-switch")
-async def trigger_kill_switch():
-    bot_state["status"] = "STOPPED"
-    bot_loop_stop_event.set()
-    bot_state["positions"] = []
-    log_to_dashboard("🚨 EMERGENCY KILL SWITCH ACTIVATED! All open positions flattened. Bot halted.", level="ERROR")
-    return {"status": "killed"}
-
-
-@app.post("/api/circuit-breaker/reset")
-async def reset_circuit_breaker():
-    bot_state["circuit_breaker_active"] = False
-    if bot_state["status"] in ("CIRCUIT_BROKEN", "STOPPED"):
-        bot_state["status"] = "STOPPED"
-    log_to_dashboard("Circuit breaker reset via Dashboard.", level="SUCCESS")
-    return {"status": "reset"}
-
-
-@app.post("/api/control/download-data")
-async def trigger_download_data(symbol: str = "RELIANCE"):
-    from scripts.download_data import generate_random_walk_candles
-
-    df = generate_random_walk_candles(symbol, datetime.now(), 30)
-    save_path = Path("data/historical") / f"{symbol.replace(' ', '_')}_5m.csv"
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(save_path, index=False)
-
-    log_to_dashboard(f"Generated 30 days of 5m data for {symbol}", level="SUCCESS")
-    return {"status": "success", "message": f"Generated data for {symbol}"}
-
-
 @app.post("/api/control/backtest")
-async def trigger_backtest(symbol: str = "RELIANCE", strategy: str = "momentum"):
+async def trigger_backtest(symbol: str = "INFY", strategy: str = "momentum"):
     from src.backtest.engine import BacktestEngine
-    from src.data.feeds.csv_feed import CSVDataFeed
     from src.execution.fees import FeeCalculator
-    from src.strategy.mean_reversion import MeanReversionStrategy
     from src.strategy.momentum import MomentumStrategy
+    import pandas as pd
 
     feed_path = Path("data/historical") / f"{symbol.replace(' ', '_')}_5m.csv"
     if not feed_path.exists():
-        from scripts.download_data import generate_random_walk_candles
+        raise HTTPException(status_code=404, detail="Historical data not found")
 
-        df_gen = generate_random_walk_candles(symbol, datetime.now(), 30)
-        feed_path.parent.mkdir(parents=True, exist_ok=True)
-        df_gen.to_csv(feed_path, index=False)
-
-    feed = CSVDataFeed(feed_path)
-    candles = await feed.get_historical_candles(symbol)
-    df = feed.to_dataframe(candles) if hasattr(feed, "to_dataframe") else None
-    if df is None or df.empty:
-        import pandas as pd
-
-        df = pd.DataFrame([c.model_dump() for c in candles])
-
-    strat_obj = (
-        MeanReversionStrategy() if strategy == "mean_reversion" else MomentumStrategy()
-    )
+    df = pd.read_csv(feed_path, parse_dates=["timestamp"]).set_index("timestamp")
     engine = BacktestEngine(
-        strategy=strat_obj,
-        initial_capital=settings.mock.initial_capital,
+        strategy=MomentumStrategy(),
+        initial_capital=settings.backtest.initial_capital,
         fee_calculator=FeeCalculator(),
         settings=settings,
     )
     res = await engine.run(df, symbol)
-
-    summary = res.metrics.summary() if hasattr(res.metrics, "summary") else res.metrics
-    summary["strategy"] = strategy
-
-    log_to_dashboard(
-        f"Backtest completed for {symbol} ({strategy}): Win rate {summary.get('win_rate', 0):.1f}%, P&L ₹{summary.get('total_pnl', 0):.2f}",
-        level="SUCCESS",
-    )
-    return summary
-
-
-async def run_bot_loop(symbol: str, interval: int, mode: str, strategy: str):
-    """Background async bot execution loop triggered by dashboard."""
-    from src.agents.orchestrator import AgentOrchestrator
-    from src.data.feeds.csv_feed import CSVDataFeed
-    from src.data.indicators import IndicatorEngine
-    from src.execution.mock_engine import MockBroker
-    from src.execution.order_validator import OrderValidator
-    from src.execution.position_manager import PositionManager
-    from src.risk.circuit_breaker import CircuitBreaker
-
-    feed_path = Path("data/historical") / f"{symbol.replace(' ', '_')}_5m.csv"
-    if not feed_path.exists():
-        from scripts.download_data import generate_random_walk_candles
-
-        df_gen = generate_random_walk_candles(symbol, datetime.now(), 30)
-        feed_path.parent.mkdir(parents=True, exist_ok=True)
-        df_gen.to_csv(feed_path, index=False)
-
-    data_feed = CSVDataFeed(feed_path)
-    broker = MockBroker(initial_capital=settings.mock.initial_capital)
-    orchestrator = AgentOrchestrator()
-    position_manager = PositionManager()
-    order_validator = OrderValidator()
-    circuit_breaker = CircuitBreaker()
-
-    if mode == "mock":
-        order_validator.set_backtest_mode(True)
-
-    candles = await data_feed.get_historical_candles(symbol)
-    window_size = 50
-
-    log_to_dashboard(f"Loaded {len(candles)} candles for {symbol}. Starting execution loop...")
-
-    for idx in range(window_size, len(candles)):
-        if bot_loop_stop_event.is_set() or bot_state["status"] != "RUNNING":
-            log_to_dashboard("Bot loop stopped.")
-            break
-
-        current_candle = candles[idx]
-        history_candles = candles[idx - window_size : idx + 1]
-
-        # 1. Update Portfolio & Check Circuit Breaker
-        portfolio = await broker.get_portfolio()
-        is_broken, reason = circuit_breaker.check(portfolio)
-        if is_broken:
-            bot_state["status"] = "CIRCUIT_BROKEN"
-            bot_state["circuit_breaker_active"] = True
-            log_to_dashboard(f"CIRCUIT BREAKER TRIGGERED: {reason}", level="ERROR")
-            break
-
-        # 2. Update Dashboard State
-        bot_state["equity"] = portfolio.equity
-        bot_state["cash"] = portfolio.current_capital
-        bot_state["realized_pnl"] = portfolio.total_realized_pnl
-        bot_state["unrealized_pnl"] = portfolio.total_unrealized_pnl
-        bot_state["max_drawdown_pct"] = portfolio.max_drawdown_pct
-        bot_state["positions"] = [p.model_dump() for p in portfolio.positions]
-        bot_state["trades"] = [t.model_dump() for t in portfolio.completed_trades]
-
-        # 3. Process mock broker bar
-        await broker.process_candle(current_candle)
-
-        # 4. Calculate indicators
-        import pandas as pd
-
-        df_history = pd.DataFrame([c.model_dump() for c in history_candles])
-        df_with_ind = IndicatorEngine.calculate(df_history)
-        latest_indicators = IndicatorEngine.get_latest_indicators(df_with_ind)
-
-        # 5. Build Context & Get Decision
-        context = MarketContext(
-            symbol=symbol,
-            exchange=Exchange.NSE,
-            current_price=current_candle.close,
-            candles=history_candles,
-            indicators=latest_indicators,
-            portfolio=portfolio,
-            timestamp=current_candle.timestamp,
-        )
-
-        decision = await orchestrator.run(context)
-
-        # Stream multi-agent opinions & full reasoning directly to UI log stream
-        if hasattr(decision, "agent_opinions") and decision.agent_opinions:
-            for opinion in decision.agent_opinions:
-                role_name = opinion.agent_role.value if hasattr(opinion.agent_role, "value") else str(opinion.agent_role)
-                act_name = opinion.action.value if hasattr(opinion.action, "value") else str(opinion.action)
-                log_to_dashboard(
-                    f"🧠 [{role_name.upper()}] Recommendation: {act_name} (Conf: {opinion.confidence:.2f})\n   Reasoning: {opinion.reasoning}",
-                    level="INFO",
-                )
-
-        act_val = decision.action.value if hasattr(decision.action, "value") else str(decision.action)
-        log_to_dashboard(
-            f"🎯 PORTFOLIO DECISION: {act_val} | Target: {symbol} @ ₹{current_candle.close:.2f} | Approved: {decision.approved_by_risk} | Rationale: {decision.reasoning}",
-            level="SUCCESS" if decision.approved_by_risk and decision.action in (SignalAction.BUY, SignalAction.SELL) else "INFO",
-        )
-
-        # 6. Execute Order if Signal Approved
-        if decision.approved_by_risk and decision.action in (SignalAction.BUY, SignalAction.SELL):
-            side = Side.BUY if decision.action == SignalAction.BUY else Side.SELL
-            qty = decision.position_size or 10
-
-            order = Order(
-                symbol=symbol,
-                side=side,
-                order_type=OrderType.MARKET,
-                quantity=qty,
-                price=current_candle.close,
-            )
-
-            is_valid, reject_reason = order_validator.validate(order, portfolio)
-            if is_valid:
-                filled_order = await broker.place_order(order)
-                if filled_order.is_terminal and filled_order.filled_quantity > 0:
-                    await position_manager.open_position(filled_order)
-                    log_to_dashboard(
-                        f"⚡ Order Filled: {side.value} {qty} {symbol} @ ₹{filled_order.average_price:.2f}",
-                        level="SUCCESS",
-                    )
-            else:
-                log_to_dashboard(f"⚠️ Order Rejected by Risk Validator: {reject_reason}", level="WARNING")
-
-        await asyncio.sleep(interval)
+    return {"status": "success", "metrics": res.metrics}
 
 
 def start_server(host: str = "0.0.0.0", port: int = 8080):
-    """Start the dashboard server."""
     uvicorn.run(app, host=host, port=port)
 
 
