@@ -13,22 +13,22 @@ from src.data.scanner import MarketScanner
 def generate_mock_candles(trend: str = "bullish", n: int = 40) -> list[Candle]:
     """Helper to generate realistic candles for testing."""
     candles = []
-    base_price = 24000.0 if trend != "bearish" else 25000.0
+    base_price = 24000.0 if trend != "bearish" else 24300.0
     start_time = datetime(2026, 11, 4, 9, 15)
 
     for i in range(n):
         if trend == "bullish":
-            price = base_price + (i * 25.0)
-            high = price + 15.0
-            low = price - 5.0
+            price = base_price + (i * 6.0)
+            high = price + 8.0
+            low = price - 4.0
         elif trend == "bearish":
-            price = base_price - (i * 25.0)
-            high = price + 5.0
-            low = price - 15.0
+            price = base_price - (i * 6.0)
+            high = price + 4.0
+            low = price - 8.0
         else:  # sideways
-            price = base_price + (10.0 if i % 2 == 0 else -10.0)
-            high = price + 10.0
-            low = price - 10.0
+            price = base_price + (5.0 if i % 2 == 0 else -5.0)
+            high = price + 6.0
+            low = price - 6.0
 
         candles.append(
             Candle(
@@ -87,8 +87,8 @@ async def test_scanner_symbol_and_ranking():
     scanner = MarketScanner(universe=["RELIANCE", "INFY"])
 
     # RELIANCE has high momentum
-    scanner.feed.get_historical_candles = AsyncMock(side_effect=lambda sym, **kwargs: (
-        generate_mock_candles("bullish", 35) if sym == "RELIANCE" else generate_mock_candles("sideways", 35)
+    scanner.feed.get_historical_candles = AsyncMock(side_effect=lambda symbol, **kwargs: (
+        generate_mock_candles("bullish", 35) if symbol == "RELIANCE" else generate_mock_candles("sideways", 35)
     ))
 
     ranked = await scanner.scan_universe()

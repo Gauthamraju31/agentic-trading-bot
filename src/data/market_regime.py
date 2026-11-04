@@ -80,13 +80,13 @@ class MarketRegimeDetector:
             is_bullish = close > ema_20 and ema_20 >= (ema_50 * 0.998) and rsi >= 48.0
             is_bearish = close < ema_20 and ema_20 <= (ema_50 * 1.002) and rsi <= 52.0
 
-            if abs(day_return_pct) > 2.0 or (adx > 40 and rsi not in range(35, 65)):
+            if abs(day_return_pct) > 2.5 or (adx > 55 and rsi not in range(25, 75) and abs(day_return_pct) > 2.0):
                 regime = MarketRegime.HIGH_VOLATILITY
                 reason = f"High volatility event: NIFTY intraday move = {day_return_pct:+.2f}%, ADX = {adx:.1f}"
-            elif is_bullish and (adx > 22 or supertrend > 0):
+            elif is_bullish and (adx > 20 or supertrend > 0):
                 regime = MarketRegime.BULLISH_TREND
                 reason = f"NIFTY in Bullish Trend: Close (₹{close:.1f}) > 20 EMA (₹{ema_20:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
-            elif is_bearish and (adx > 22 or supertrend < 0):
+            elif is_bearish and (adx > 20 or supertrend < 0):
                 regime = MarketRegime.BEARISH_TREND
                 reason = f"NIFTY in Bearish Trend: Close (₹{close:.1f}) < 20 EMA (₹{ema_20:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
             else:
