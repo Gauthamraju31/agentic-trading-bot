@@ -1,10 +1,11 @@
 """Autonomous Daily Trading Bot Runner.
 
 Architecture:
-- Phase 1 (08:45 - 09:15 IST): Pre-market AI planner runs once to analyze macro cues, VIX, news, and select target stocks.
-- Phase 2 (09:15 - 15:30 IST): Deterministic quantitative execution engine evaluates market bars, manages positions,
-  trailing stops, and risk limits (sub-second execution, zero LLM quota burn).
-- Phase 3 (15:30 - 15:45 IST): Auto-squareoff all open intraday positions and update daily goals.
+- Phase 1 (08:45 - 09:15 IST): Pre-market AI planner & multi-stock scanner select prime watchlist.
+- Phase 2 (09:15 - 15:20 IST): Real-time execution engine evaluates NIFTY market regime, scans watchlist,
+  executes deterministic technical signals, and manages dynamic ATR trailing stops.
+- Phase 3 (15:20 - 15:30 IST): Auto-squareoff all open intraday positions before market close.
+- Phase 4 (15:45 - 16:00 IST): Post-market reflection review logs trade lessons into persistent memory.
 - Idle Phase: Outside market hours and weekends, daemon stays alive, sleeping with quiet periodic heartbeats.
 """
 
@@ -13,6 +14,7 @@ import asyncio
 from datetime import datetime, time, timedelta
 from pathlib import Path
 import sys
+from typing import Dict, List, Optional
 
 # Ensure project root is in python path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -23,6 +25,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from src.agents.pre_market_planner import PreMarketPlanner
+from src.agents.trade_memory import TradeReflectionMemory
 from src.core.config import settings
 from src.core.daily_goal_manager import DailyGoalManager
 from src.core.enums import Exchange, OrderType, PositionType, Side, SignalAction, TimeFrame
@@ -31,6 +34,8 @@ from src.core.models import Candle, Order
 from src.dashboard.alerts import AlertManager
 from src.data.feeds.live_feed import LiveDataFeed
 from src.data.indicators import IndicatorEngine
+from src.data.market_regime import MarketRegime, MarketRegimeDetector
+from src.data.scanner import MarketScanner
 from src.execution.fees import FeeCalculator
 from src.execution.mock_engine import MockBroker
 from src.execution.order_validator import OrderValidator
@@ -49,6 +54,10 @@ class AutonomousTradingBot:
 
         self.goal_mgr = DailyGoalManager()
         self.planner = PreMarketPlanner()
+        self.scanner = MarketScanner()
+        self.regime_detector = MarketRegimeDetector(cache_ttl_seconds=60)
+        self.reflection_memory = TradeReflectionMemory()
+
         self.broker = MockBroker(initial_capital=settings.mock.initial_capital)
         self.validator = OrderValidator()
         self.validator.set_backtest_mode(True)  # allows simulated execution
@@ -61,34 +70,47 @@ class AutonomousTradingBot:
         self.feed = LiveDataFeed()
         self.strategy = MomentumStrategy()
 
-        # Active stops per symbol: symbol -> (stop_loss_price, take_profit_price, trailing_stop, side)
-        self.active_stops: dict[str, dict] = {}
-        self.target_symbol: str = "INFY"
+        # Multi-stock watchlist & execution state
+        self.watchlist: List[str] = ["INFY", "TCS", "RELIANCE"]
+        self.max_open_positions: int = 1
+        self.active_stops: Dict[str, Dict] = {}
         self.pre_market_done_for_date: str = ""
+        self.post_market_done_for_date: str = ""
 
     def log_banner(self):
         now_ist = get_ist_now()
         mkt_status = get_market_status()
         self.console.print(
             Panel.fit(
-                "[bold green]🤖 Autonomous Indian Daily Trading Bot[/bold green]\n"
+                "[bold green]🤖 Autonomous Indian Daily Trading Bot (Phase 2)[/bold green]\n"
                 f"[dim]Timezone: [bold cyan]IST (Asia/Kolkata)[/bold cyan] | Current Time: [bold white]{now_ist.strftime('%Y-%m-%d %H:%M:%S IST')}[/bold white][/dim]\n"
                 f"[dim]Market Status: [bold yellow]{mkt_status['status']}[/bold yellow] ({mkt_status['reason']})[/dim]\n"
                 f"[dim]Capital: [bold green]₹{self.broker.current_capital:,.2f}[/bold green] | "
                 f"Daily Goal: [bold yellow]₹{self.goal_mgr.target_profit:.2f}[/bold yellow] | "
-                f"Max Loss: [bold red]₹{self.goal_mgr.max_loss:.2f}[/bold red][/dim]",
+                f"Max Loss: [bold red]₹{self.goal_mgr.max_loss:.2f}[/bold red][/dim]\n"
+                f"[dim]Active Watchlist: [bold cyan]{', '.join(self.watchlist)}[/bold cyan][/dim]",
                 border_style="green",
             )
         )
 
     async def run_pre_market_phase(self, today_str: str):
-        """Runs AI pre-market analysis once per day at ~08:45 - 09:15 IST."""
+        """Runs AI pre-market analysis and multi-stock scan once per day at ~08:45 - 09:15 IST."""
         if self.pre_market_done_for_date == today_str:
             return
 
-        self.console.print("[bold yellow]Phase 1: Running Pre-Market Autonomous Research...[/bold yellow]")
-        playbook = self.planner.get_latest_playbook()
+        self.console.print("[bold yellow]Phase 1: Running Pre-Market Autonomous Research & Multi-Stock Scanner...[/bold yellow]")
 
+        # 1. Multi-Stock Opportunity Scan
+        try:
+            top_watchlist = await self.scanner.get_top_watchlist(n=3)
+            if top_watchlist:
+                self.watchlist = top_watchlist
+                logger.info(f"[PreMarket] Multi-Stock Scanner selected watchlist: {self.watchlist}")
+        except Exception as e:
+            logger.warning(f"[PreMarket] Multi-stock scan error: {e}. Keeping current watchlist.")
+
+        # 2. AI Pre-market Planner (Macro & News)
+        playbook = self.planner.get_latest_playbook()
         if not playbook or playbook.get("date") != today_str:
             try:
                 playbook = await self.planner.run_pre_market_analysis()
@@ -99,49 +121,89 @@ class AutonomousTradingBot:
         if playbook and playbook.get("primary_pick"):
             pick = playbook["primary_pick"]
             pick_sym = pick.get("symbol")
-            if pick_sym:
-                self.target_symbol = pick_sym
+            if pick_sym and pick_sym not in self.watchlist:
+                self.watchlist.insert(0, pick_sym)
+                self.watchlist = self.watchlist[:3]
+
             if self.alert_mgr.enabled:
                 await self.alert_mgr.send_alert(
-                    f"📋 <b>Pre-Market AI Playbook Ready</b> ({today_str})\n"
-                    f"Primary Choice: <b>{pick.get('symbol')}</b> [{pick.get('action')}]\n"
-                    f"Reasoning: {pick.get('reasoning', '')[:150]}...",
+                    f"📋 <b>Pre-Market Playbook Ready</b> ({today_str})\n"
+                    f"Primary Pick: <b>{pick.get('symbol')}</b> [{pick.get('action')}]\n"
+                    f"Watchlist: {', '.join(self.watchlist)}\n"
+                    f"Reasoning: {pick.get('reasoning', '')[:120]}...",
                     level="PRE_MARKET",
                 )
 
         self.pre_market_done_for_date = today_str
-        logger.info(f"[PreMarket] Target Symbol for Today: {self.target_symbol}")
+        logger.info(f"[PreMarket] Ready for market open with Watchlist: {self.watchlist}")
 
     async def manage_open_positions(self, candle: Candle):
-        """Check SL / TP and update trailing stops for open positions."""
+        """Check SL / TP and dynamically advance ATR trailing stops for open positions."""
         symbol = candle.symbol
         pos = self.broker.positions.get(symbol)
         if not pos or symbol not in self.active_stops:
             return
 
         stop_info = self.active_stops[symbol]
+        entry_price = stop_info["entry_price"]
         stop_loss = stop_info["stop_loss"]
         take_profit = stop_info["take_profit"]
+        stop_dist = stop_info.get("stop_dist", abs(entry_price - stop_loss))
         side = stop_info["side"]
 
         exit_price = None
         exit_reason = None
 
+        # 1. Update Trailing Stop Milestones
         if side == Side.BUY:
+            highest = max(stop_info.get("highest_price", entry_price), candle.high)
+            stop_info["highest_price"] = highest
+
+            # Milestone A: If price reached +1.0R, move SL to Breakeven
+            if highest >= (entry_price + stop_dist) and stop_loss < entry_price:
+                stop_info["stop_loss"] = entry_price
+                stop_loss = entry_price
+                logger.info(f"[TrailingStop] {symbol}: +1.0R reached! Trailing SL moved to Breakeven (₹{entry_price:.2f})")
+
+            # Milestone B: If price reached +1.5R, lock in +0.75R profit
+            elif highest >= (entry_price + 1.5 * stop_dist) and stop_loss < (entry_price + 0.75 * stop_dist):
+                stop_info["stop_loss"] = entry_price + (0.75 * stop_dist)
+                stop_loss = stop_info["stop_loss"]
+                logger.info(f"[TrailingStop] {symbol}: +1.5R reached! Trailing SL moved to lock profit (₹{stop_loss:.2f})")
+
+            # Check exits
             if candle.low <= stop_loss:
                 exit_price = stop_loss
-                exit_reason = "STOP_LOSS_HIT"
+                exit_reason = "TRAILING_STOP_HIT" if stop_loss >= entry_price else "STOP_LOSS_HIT"
             elif candle.high >= take_profit:
                 exit_price = take_profit
                 exit_reason = "TAKE_PROFIT_HIT"
-        else:  # SELL
+
+        else:  # SELL (Short)
+            lowest = min(stop_info.get("lowest_price", entry_price), candle.low)
+            stop_info["lowest_price"] = lowest
+
+            # Milestone A: If price dropped -1.0R, move SL to Breakeven
+            if lowest <= (entry_price - stop_dist) and stop_loss > entry_price:
+                stop_info["stop_loss"] = entry_price
+                stop_loss = entry_price
+                logger.info(f"[TrailingStop] {symbol}: +1.0R reached! Trailing SL moved to Breakeven (₹{entry_price:.2f})")
+
+            # Milestone B: If price dropped -1.5R, lock in +0.75R profit
+            elif lowest <= (entry_price - 1.5 * stop_dist) and stop_loss > (entry_price - 0.75 * stop_dist):
+                stop_info["stop_loss"] = entry_price - (0.75 * stop_dist)
+                stop_loss = stop_info["stop_loss"]
+                logger.info(f"[TrailingStop] {symbol}: +1.5R reached! Trailing SL moved to lock profit (₹{stop_loss:.2f})")
+
+            # Check exits
             if candle.high >= stop_loss:
                 exit_price = stop_loss
-                exit_reason = "STOP_LOSS_HIT"
+                exit_reason = "TRAILING_STOP_HIT" if stop_loss <= entry_price else "STOP_LOSS_HIT"
             elif candle.low <= take_profit:
                 exit_price = take_profit
                 exit_reason = "TAKE_PROFIT_HIT"
 
+        # Execute exit if triggered
         if exit_price is not None:
             logger.info(f"[PositionManager] {exit_reason} for {symbol} at ₹{exit_price:.2f}")
             close_ord = Order(
@@ -164,60 +226,78 @@ class AutonomousTradingBot:
                 logger.info(f"[DailyGoal] Trade closed: Net P&L = ₹{last_trade.net_pnl:+.2f} | Status = {new_status}")
 
     async def execute_trading_tick(self):
-        """Fetches latest live data, computes technical signals, executes orders if valid."""
-        target_symbol = self.target_symbol
-        candles = await self.feed.get_historical_candles(target_symbol, Exchange.NSE, TimeFrame.M5)
+        """Fetches live data for active positions & watchlist, applies NIFTY regime filter, executes valid setups."""
+        # 1. Manage open positions first
+        for sym in list(self.broker.positions.keys()):
+            pos_candles = await self.feed.get_historical_candles(sym, Exchange.NSE, TimeFrame.M5)
+            if pos_candles:
+                latest_pos_candle = pos_candles[-1]
+                await self.broker.process_candle(latest_pos_candle)
+                await self.manage_open_positions(latest_pos_candle)
 
-        if not candles or len(candles) < 28:
-            logger.warning(f"Insufficient candle data for {target_symbol} ({len(candles) if candles else 0} bars)")
-            return
-
-        latest_candle = candles[-1]
-        await self.broker.process_candle(latest_candle)
-
-        # Check existing position exit conditions first
-        await self.manage_open_positions(latest_candle)
-
-        # If goal reached or max loss hit, stop new orders
+        # 2. Check daily goal or circuit breaker
         if self.goal_mgr.status in ("GOAL_REACHED", "STOP_LOSS_HIT"):
             return
 
-        # Check if already in a position for this symbol
         portfolio = await self.broker.get_portfolio()
-        if target_symbol in self.broker.positions:
-            pos = self.broker.positions[target_symbol]
-            current_pnl = (latest_candle.close - pos.entry_price) * pos.quantity if pos.side == Side.BUY else (pos.entry_price - latest_candle.close) * pos.quantity
-            self.console.print(
-                f"[{get_ist_now().strftime('%H:%M:%S')}] HOLDING {pos.quantity}x {target_symbol} @ ₹{pos.entry_price:.2f} | "
-                f"LTP: ₹{latest_candle.close:.2f} | Open P&L: ₹{current_pnl:+.2f} | Daily Realized: ₹{self.goal_mgr.realized_pnl:+.2f}"
-            )
+
+        # 3. If currently holding max positions, display status and hold
+        if len(self.broker.positions) >= self.max_open_positions:
+            for sym, pos in self.broker.positions.items():
+                ltp = self.broker.last_prices.get(sym, pos.entry_price)
+                open_pnl = (ltp - pos.entry_price) * pos.quantity if pos.side == Side.BUY else (pos.entry_price - ltp) * pos.quantity
+                self.console.print(
+                    f"[{get_ist_now().strftime('%H:%M:%S')}] HOLDING {pos.quantity}x {sym} @ ₹{pos.entry_price:.2f} | "
+                    f"LTP: ₹{ltp:.2f} | Open P&L: ₹{open_pnl:+.2f} | Daily Realized: ₹{self.goal_mgr.realized_pnl:+.2f}"
+                )
             return
 
-        # Compute technical indicators
-        df = pd.DataFrame([c.model_dump() for c in candles])
-        df_ind = self.indicator_engine.calculate(df)
-        indicators = self.indicator_engine.get_latest_indicators(df_ind)
+        # 4. Check NIFTY 50 Index Market Regime Filter
+        regime, regime_details = await self.regime_detector.get_current_regime()
 
-        if not indicators:
-            return
+        # 5. Scan Watchlist candidates for new entry opportunities
+        for candidate_symbol in self.watchlist:
+            if candidate_symbol in self.broker.positions:
+                continue
 
-        signals = self.strategy.generate_signals(candles, indicators, portfolio)
-        signal_action = "HOLD"
-        confidence = 0.0
+            candles = await self.feed.get_historical_candles(candidate_symbol, Exchange.NSE, TimeFrame.M5)
+            if not candles or len(candles) < 28:
+                continue
 
-        if signals:
+            latest_candle = candles[-1]
+            await self.broker.process_candle(latest_candle)
+
+            df = pd.DataFrame([c.model_dump() for c in candles])
+            df_ind = self.indicator_engine.calculate(df)
+            indicators = self.indicator_engine.get_latest_indicators(df_ind)
+            if not indicators:
+                continue
+
+            signals = self.strategy.generate_signals(candles, indicators, portfolio)
+            if not signals:
+                continue
+
             active_sig = signals[-1]
-            signal_action = active_sig.action.value
-            confidence = active_sig.confidence
+            if active_sig.action not in (SignalAction.BUY, SignalAction.SELL):
+                continue
 
-            # Size and validate order
+            # Validate Signal against NIFTY Regime
+            allowed, regime_reason = await self.regime_detector.validate_trade(candidate_symbol, active_sig.action)
+            if not allowed:
+                logger.info(f"[RegimeFilter] {candidate_symbol} {active_sig.action.value} blocked: {regime_reason}")
+                continue
+
+            # Sizing & Dynamic ATR Stop Loss / Take Profit
             trade_side = Side.BUY if active_sig.action == SignalAction.BUY else Side.SELL
             entry_price = latest_candle.close
-            stop_pct = settings.risk.default_stop_loss_pct / 100.0
-            rr = 2.0  # 2:1 Reward to Risk
 
-            stop_loss = entry_price * (1.0 - stop_pct) if trade_side == Side.BUY else entry_price * (1.0 + stop_pct)
-            take_profit = entry_price * (1.0 + stop_pct * rr) if trade_side == Side.BUY else entry_price * (1.0 - stop_pct * rr)
+            # ATR-based volatility stop (clamped between 0.8% and 2.5%)
+            atr_val = indicators.atr_14 or (entry_price * 0.012)
+            stop_dist = max(entry_price * 0.008, min(entry_price * 0.025, 1.5 * atr_val))
+            take_profit_dist = 2.0 * stop_dist  # Strict 2:1 R:R
+
+            stop_loss = entry_price - stop_dist if trade_side == Side.BUY else entry_price + stop_dist
+            take_profit = entry_price + take_profit_dist if trade_side == Side.BUY else entry_price - take_profit_dist
 
             qty = self.position_sizer.calculate_size(
                 method=settings.risk.position_sizing,
@@ -229,7 +309,7 @@ class AutonomousTradingBot:
 
             if qty > 0:
                 order = Order(
-                    symbol=target_symbol,
+                    symbol=candidate_symbol,
                     side=trade_side,
                     order_type=OrderType.MARKET,
                     quantity=qty,
@@ -237,28 +317,70 @@ class AutonomousTradingBot:
                     position_type=PositionType.INTRADAY,
                 )
 
-                # Correct validation call
                 is_valid, reason = self.validator.validate(order, portfolio)
                 if is_valid:
-                    self.broker.last_prices[target_symbol] = entry_price
+                    self.broker.last_prices[candidate_symbol] = entry_price
                     filled = await self.broker.place_order(order)
                     if filled and filled.status.value == "FILLED":
-                        self.active_stops[target_symbol] = {
+                        self.active_stops[candidate_symbol] = {
+                            "entry_price": entry_price,
                             "stop_loss": stop_loss,
                             "take_profit": take_profit,
+                            "stop_dist": stop_dist,
                             "side": trade_side,
+                            "highest_price": entry_price,
+                            "lowest_price": entry_price,
                         }
-                        logger.success(f"ORDER FILLED: {trade_side.value} {qty} {target_symbol} @ ₹{entry_price:.2f} (SL: ₹{stop_loss:.2f}, TP: ₹{take_profit:.2f})")
+                        logger.success(
+                            f"ORDER FILLED: {trade_side.value} {qty} {candidate_symbol} @ ₹{entry_price:.2f} "
+                            f"(SL: ₹{stop_loss:.2f}, TP: ₹{take_profit:.2f}, ATR: ₹{atr_val:.2f}) | Regime: {regime.value}"
+                        )
                         if self.alert_mgr.enabled:
-                            await self.alert_mgr.send_alert(f"🚀 Executed {trade_side.value} {qty} {target_symbol} @ ₹{entry_price:.2f}")
+                            await self.alert_mgr.send_alert(
+                                f"🚀 Executed {trade_side.value} {qty} {candidate_symbol} @ ₹{entry_price:.2f}\n"
+                                f"SL: ₹{stop_loss:.2f} | TP: ₹{take_profit:.2f} (2:1 R:R)"
+                            )
+                        # Entered position; stop evaluating further symbols this tick
+                        break
                 else:
-                    logger.debug(f"Order rejected by validator: {reason}")
+                    logger.debug(f"Order rejected by validator for {candidate_symbol}: {reason}")
 
+        # Tick Summary Heartbeat
+        primary_sym = self.watchlist[0] if self.watchlist else "INFY"
         self.console.print(
-            f"[{get_ist_now().strftime('%H:%M:%S')}] {target_symbol} @ ₹{latest_candle.close:.2f} | "
-            f"Signal: [bold magenta]{signal_action}[/bold magenta] (Conf: {confidence:.2f}) | "
+            f"[{get_ist_now().strftime('%H:%M:%S')}] Watchlist: {', '.join(self.watchlist)} | "
+            f"NIFTY: {regime.value} | "
             f"Daily P&L: ₹{self.goal_mgr.realized_pnl:+.2f} / ₹{self.goal_mgr.target_profit:.2f}"
         )
+
+    async def run_post_market_phase(self, today_str: str):
+        """Runs post-market reflection and persistent memory calibration at ~15:45 IST."""
+        if self.post_market_done_for_date == today_str:
+            return
+
+        self.console.print("[bold cyan]Phase 4: Running Post-Market Autonomous Reflection...[/bold cyan]")
+        logger.info("[PostMarket] Generating trade reflection memory entries for completed trades...")
+
+        completed = self.broker.completed_trades
+        if completed:
+            for trade in completed:
+                pnl_pct = (trade.net_pnl / (trade.entry_price * trade.quantity)) * 100.0 if trade.entry_price else 0.0
+                outcome = "SUCCESS" if trade.net_pnl > 0 else "LOSS"
+                self.reflection_memory.record_reflection(
+                    symbol=trade.symbol,
+                    action=trade.side.value if hasattr(trade.side, "value") else str(trade.side),
+                    entry_price=trade.entry_price,
+                    exit_price=trade.exit_price,
+                    pnl_pct=pnl_pct,
+                    alpha_pct=None,
+                    reasoning_summary=f"Intraday 5m Momentum trade. Regime-aligned execution. Net P&L: ₹{trade.net_pnl:+.2f}",
+                    outcome=outcome,
+                )
+            logger.success(f"[PostMarket] Recorded {len(completed)} trade reflections to memory.")
+        else:
+            logger.info("[PostMarket] No trades executed today. No new reflections needed.")
+
+        self.post_market_done_for_date = today_str
 
     async def auto_squareoff(self):
         """Auto-squareoff remaining open intraday positions before market close."""
@@ -317,7 +439,17 @@ class AutonomousTradingBot:
                     await asyncio.sleep(60)
                     continue
 
-                # Post-Market / Overnight: After 15:30 IST
+                # Post-Market Reflection Window: 15:30 - 16:00 IST
+                elif time(15, 30) <= current_time < time(16, 0):
+                    if self.broker.positions:
+                        await self.auto_squareoff()
+                    if current_time >= time(15, 45):
+                        await self.run_post_market_phase(today_str)
+                    logger.info(f"[Daemon] Post-Market Session. Realized P&L: ₹{self.goal_mgr.realized_pnl:+.2f}. Resting...")
+                    await asyncio.sleep(600)
+                    continue
+
+                # Overnight Rest: After 16:00 or before 08:45 IST
                 else:
                     if self.broker.positions:
                         await self.auto_squareoff()
