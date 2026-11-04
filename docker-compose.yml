@@ -12,6 +12,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - ./src:/app/src
+      - ./scripts:/app/scripts
       # Mount host agy CLI binary and authentication data
       - ~/.local/bin/agy:/usr/local/bin/agy:ro
       - ~/.gemini:/home/trader/.gemini
@@ -39,6 +41,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./config:/app/config
+      - ./src:/app/src
+      - ./scripts:/app/scripts
       # Mount host agy CLI binary and authentication data
       - ~/.local/bin/agy:/usr/local/bin/agy:ro
       - ~/.gemini:/home/trader/.gemini
