@@ -64,7 +64,7 @@ class MarketScanner:
             adx = float(latest.get("ADX_14", 20.0))
             atr = float(latest.get("ATR_14", close * 0.01))
             vol = float(latest["volume"])
-            vol_sma = float(latest.get("VOLUME_SMA_20", vol or 1.0))
+            vol_sma = float(latest.get("VOL_SMA_20", latest.get("VOLUME_SMA_20", vol or 1.0)))
 
             rvol = round(vol / max(1.0, vol_sma), 2)
             atr_pct = round((atr / close) * 100.0, 2)

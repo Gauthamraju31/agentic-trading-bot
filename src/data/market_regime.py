@@ -67,11 +67,12 @@ class MarketRegimeDetector:
                 return float(val)
 
             close = float(latest["close"])
-            ema_20 = _safe_float(latest.get("EMA_20"), close)
-            ema_50 = _safe_float(latest.get("EMA_50"), ema_20)
+            ema_9 = _safe_float(latest.get("EMA_9"), close)
+            ema_21 = _safe_float(latest.get("EMA_21"), close)
+            sma_50 = _safe_float(latest.get("SMA_50"), ema_21)
             rsi = _safe_float(latest.get("RSI_14"), 50.0)
             adx = _safe_float(latest.get("ADX_14"), 20.0)
-            supertrend = _safe_float(latest.get("SUPERTREND"), 0.0)
+            supertrend_dir = _safe_float(latest.get("SUPERTREND_DIR"), 0.0)
 
             # Calculate day range / trend strength
             day_open = float(df["open"].iloc[0])
@@ -82,18 +83,18 @@ class MarketRegimeDetector:
             reason = "Market is consolidating in a range"
 
             # Trend identification
-            is_bullish = close > ema_20 and ema_20 >= (ema_50 * 0.998) and rsi >= 48.0
-            is_bearish = close < ema_20 and ema_20 <= (ema_50 * 1.002) and rsi <= 52.0
+            is_bullish = (close >= ema_9 >= ema_21) and (rsi >= 48.0 or supertrend_dir > 0)
+            is_bearish = (close <= ema_9 <= ema_21) and (rsi <= 52.0 or supertrend_dir < 0)
 
             if abs(day_return_pct) > 2.5 or (adx > 55 and rsi not in range(25, 75) and abs(day_return_pct) > 2.0):
                 regime = MarketRegime.HIGH_VOLATILITY
                 reason = f"High volatility event: NIFTY intraday move = {day_return_pct:+.2f}%, ADX = {adx:.1f}"
-            elif is_bullish and (adx > 20 or supertrend > 0):
+            elif is_bullish and (adx > 18 or supertrend_dir > 0):
                 regime = MarketRegime.BULLISH_TREND
-                reason = f"NIFTY in Bullish Trend: Close (₹{close:.1f}) > 20 EMA (₹{ema_20:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
-            elif is_bearish and (adx > 20 or supertrend < 0):
+                reason = f"NIFTY in Bullish Trend: Close (₹{close:.1f}) >= 9 EMA (₹{ema_9:.1f}) >= 21 EMA (₹{ema_21:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
+            elif is_bearish and (adx > 18 or supertrend_dir < 0):
                 regime = MarketRegime.BEARISH_TREND
-                reason = f"NIFTY in Bearish Trend: Close (₹{close:.1f}) < 20 EMA (₹{ema_20:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
+                reason = f"NIFTY in Bearish Trend: Close (₹{close:.1f}) <= 9 EMA (₹{ema_9:.1f}) <= 21 EMA (₹{ema_21:.1f}), RSI = {rsi:.1f}, ADX = {adx:.1f}"
             else:
                 regime = MarketRegime.SIDEWAYS_CHOP
                 reason = f"NIFTY Rangebound / Chop: ADX = {adx:.1f}, RSI = {rsi:.1f}, Close near EMAs"
@@ -102,12 +103,13 @@ class MarketRegimeDetector:
                 "regime": regime.value,
                 "reason": reason,
                 "nifty_close": close,
-                "ema_20": ema_20,
-                "ema_50": ema_50,
+                "ema_9": ema_9,
+                "ema_21": ema_21,
+                "sma_50": sma_50,
                 "rsi_14": rsi,
                 "adx_14": adx,
                 "day_return_pct": day_return_pct,
-                "supertrend_bullish": supertrend > 0,
+                "supertrend_bullish": supertrend_dir > 0,
                 "timestamp": now.isoformat(),
             }
 
